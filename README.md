@@ -16,7 +16,7 @@ git clone https://github.com/BirjuVachhani/scripts.git $HOME/.scripts && $HOME/.
 Or using curl to download and execute the install script directly:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/BirjuVachhani/scripts/main/install.sh | bash -s -- $HOME/.scripts
+curl -fsSL https://raw.githubusercontent.com/BirjuVachhani/scripts/refs/heads/main/install.sh | bash -s -- $HOME/.scripts
 ```
 
 This will:
@@ -37,7 +37,7 @@ git clone https://github.com/<YOUR_USERNAME>/scripts.git $HOME/.scripts && $HOME
 Or using curl to download and execute the install script directly. Replace `<YOUR_USERNAME>` with your Github User Name.
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/YOUR_USERNAME/scripts/main/install.sh | bash -s -- $HOME/.scripts
+curl -fsSL https://raw.githubusercontent.com/BirjuVachhani/scripts/refs/heads/main/install.sh | bash -s -- $HOME/.scripts
 ```
 
 ## Adding your own custom scripts
