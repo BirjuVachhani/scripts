@@ -1,0 +1,93 @@
+#!/usr/bin/env dart
+
+import 'dart:io';
+
+/// Recursively updates Flutter dependencies in all projects containing pubspec.yaml
+void main(List<String> args) async {
+  // Parse arguments and get target directory
+  final targetDir = args.isEmpty ? Directory.current : Directory(args[0]);
+
+  if (!await targetDir.exists()) {
+    print('Error: Directory "${targetDir.path}" does not exist');
+    exit(1);
+  }
+
+  print('Starting Flutter dependencies update in: ${targetDir.absolute.path}');
+  print('----------------------------------------');
+
+  try {
+    await checkFlutter();
+    await processDirectory(targetDir);
+  } catch (e) {
+    print('Error: $e');
+    exit(1);
+  }
+}
+
+/// Check if Flutter is installed and accessible
+Future<void> checkFlutter() async {
+  try {
+    final result = await Process.run('flutter', ['--version']);
+    if (result.exitCode != 0) {
+      throw 'Flutter command failed';
+    }
+  } catch (e) {
+    throw 'Flutter is not installed or not in PATH';
+  }
+}
+
+/// Process a directory recursively and run flutter pub get where needed
+Future<void> processDirectory(Directory dir) async {
+  int totalCount = 0;
+  int errorCount = 0;
+
+  try {
+    // Find all pubspec.yaml files recursively
+    await for (final entity in dir.list(recursive: true, followLinks: false)) {
+      if (entity is File && entity.path.endsWith('/pubspec.yaml')) {
+        totalCount++;
+        final projectDir = entity.parent.path;
+
+        print('\nFound Flutter project at: ${projectDir.replaceFirst(dir.path, '')}');
+        print('Running "flutter pub get"...');
+
+        try {
+          final result = await Process.run(
+            'flutter',
+            ['pub', 'get'],
+            workingDirectory: projectDir,
+            runInShell: true,
+          );
+
+          if (result.exitCode == 0) {
+            print('✓ Successfully updated dependencies');
+          } else {
+            print('✗ Failed to update dependencies');
+            print('Error: ${result.stderr}');
+            errorCount++;
+          }
+        } catch (e) {
+          print('✗ Failed to update dependencies');
+          print('Error: $e');
+          errorCount++;
+        }
+
+        print('----------------------------------------');
+      }
+    }
+
+    // Print summary
+    print('\nSummary:');
+    print('Total projects found: $totalCount');
+    if (errorCount == 0) {
+      print('All projects updated successfully!');
+    } else {
+      print('Failed updates: $errorCount');
+      print('Successful updates: ${totalCount - errorCount}');
+    }
+
+  } catch (e) {
+    print('Error scanning directories: $e');
+    exit(1);
+  }
+}

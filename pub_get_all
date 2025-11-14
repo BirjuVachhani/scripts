@@ -1,0 +1,169 @@
+#!/bin/bash
+
+# Print script usage
+print_usage() {
+    echo "Usage: $0 [directory]"
+    echo "If directory is not specified, current directory will be used."
+    echo "The script will recursively search for pubspec.yaml files and run 'flutter pub get' or 'dart pub get' based on dependencies"
+}
+
+# Check if pubspec file has flutter SDK as dependency
+has_flutter_dependency() {
+    local pubspec_path="$1"
+
+    # Check if flutter is listed under dependencies or dev_dependencies
+    if grep -q "^\s*flutter:" "$pubspec_path"; then
+        return 0
+    fi
+    return 1
+}
+
+# Check if flutter is installed
+check_flutter() {
+    if ! command -v flutter &> /dev/null; then
+        echo "Error: Flutter is not installed or not in PATH"
+        exit 1
+    fi
+}
+
+# Get project name from pubspec file
+get_project_name() {
+    local pubspec_path="$1"
+    grep "^name:" "$pubspec_path" | sed 's/name:[[:space:]]*//g' | head -1
+}
+
+# Spinner animation
+show_spinner() {
+    local pid=$1
+    local padded_name=$2
+    local rel_path=$3
+    local col_width=$4
+    local spinner=( '⠋' '⠙' '⠹' '⠸' '⠼' '⠴' '⠦' '⠧' '⠇' '⠏' )
+    local i=0
+    local blue=$'\033[34m'
+    local grey=$'\033[90m'
+    local reset=$'\033[0m'
+
+    while kill -0 "$pid" 2>/dev/null; do
+        printf "\r${blue}${spinner[$((i % ${#spinner[@]}))]}${reset} ${blue}%s${reset} ${grey}:%s${reset}" "$padded_name" "$rel_path"
+        ((i++))
+        sleep 0.1
+    done
+}
+
+# Process a directory
+process_directory() {
+    local dir="$1"
+    local count=0
+    local errors=0
+    local max_name_length=0
+
+    # First pass: find all projects and calculate max name length
+    local -a projects=()
+    while IFS= read -r -d '' pubspec_path; do
+        local project_dir
+        project_dir=$(dirname "$pubspec_path")
+        local project_name
+        project_name=$(get_project_name "$pubspec_path")
+
+        projects+=("$pubspec_path")
+
+        # Track max length
+        if (( ${#project_name} > max_name_length )); then
+            max_name_length=${#project_name}
+        fi
+    done < <(find "$dir" \( -name "pubspec.yaml" -o -name "pubspec.yml" \) -print0)
+
+    # Add padding (10-15 spaces)
+    max_name_length=$((max_name_length + 12))
+
+    # Second pass: process all projects
+    for pubspec_path in "${projects[@]}"; do
+        count=$((count + 1))
+        local project_dir
+        project_dir=$(dirname "$pubspec_path")
+
+        # Get relative path from target directory
+        local rel_path
+        rel_path=$(python3 -c "import os.path; print(os.path.relpath('$project_dir', '$dir'))" 2>/dev/null || echo "$project_dir")
+
+        # Get project name from pubspec
+        local project_name
+        project_name=$(get_project_name "$pubspec_path")
+
+        # Check if flutter SDK is a dependency
+        if has_flutter_dependency "$pubspec_path"; then
+            local command="flutter pub get"
+        else
+            local command="dart pub get"
+        fi
+
+        # Color codes
+        local green=$'\033[32m'
+        local red=$'\033[31m'
+        local grey=$'\033[90m'
+        local reset=$'\033[0m'
+
+        # Create padded project name (without colon)
+        local padded_name
+        printf -v padded_name "%-${max_name_length}s" "$project_name"
+
+        # Run command in background
+        (cd "$project_dir" && eval "$command" > /dev/null 2>&1) &
+        local pid=$!
+
+        # Show spinner while process runs
+        show_spinner $pid "$padded_name" "$rel_path" "$max_name_length"
+
+        # Check result and replace spinner with status
+        if wait $pid; then
+            printf "\r${green}[ok]${reset} ${green}%s${reset} ${grey}:%s${reset}\n" "$padded_name" "$rel_path"
+        else
+            printf "\r${red}[error]${reset} ${red}%s${reset} ${grey}:%s${reset}\n" "$padded_name" "$rel_path"
+            errors=$((errors + 1))
+        fi
+
+    done
+
+    # Print summary
+    echo ""
+    echo "Summary:"
+    echo "Total projects found: $count"
+    if [ $errors -eq 0 ]; then
+        echo "All projects updated successfully!"
+    else
+        echo "Failed updates: $errors"
+        echo "Successful updates: $((count - errors))"
+    fi
+    echo "----------------------------------------"
+}
+
+# Main script
+
+# Show help if requested
+if [ "$1" = "-h" ] || [ "$1" = "--help" ]; then
+    print_usage
+    exit 0
+fi
+
+# Check if Flutter is installed
+check_flutter
+
+# Get target directory
+target_dir="${1:-.}"
+
+# Verify directory exists
+if [ ! -d "$target_dir" ]; then
+    echo "Error: Directory '$target_dir' does not exist"
+    exit 1
+fi
+
+# Convert to absolute path
+target_dir=$(cd "$target_dir" && pwd)
+
+echo "----------------------------------------"
+echo "Starting Flutter dependencies update in: $target_dir"
+echo "----------------------------------------"
+
+# Process the directory
+process_directory "$target_dir"

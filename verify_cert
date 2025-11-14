@@ -1,0 +1,168 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+say() { echo "$@" >&2; }
+normalize_fp() { tr -d ':' | tr '[:lower:]' '[:upper:]'; }
+tolower() { tr '[:upper:]' '[:lower:]'; }
+
+DEBUG="0"
+if [[ "${1:-}" == "--debug" ]]; then DEBUG="1"; shift; fi
+
+# Prefer OpenSSL 3 (Homebrew), then PATH, then system
+pick_ossl() {
+  for bin in \
+    /opt/homebrew/opt/openssl@3/bin/openssl \
+    /usr/local/opt/openssl@3/bin/openssl \
+    "$(command -v openssl 2>/dev/null || true)" \
+    /usr/bin/openssl
+  do
+    [[ -x "$bin" ]] && { echo "$bin"; return; }
+  done
+  echo ""; return
+}
+OSSL_BIN="$(pick_ossl)"
+[[ -n "$OSSL_BIN" ]] || { say "❌ ERROR: openssl not found"; exit 2; }
+
+cert_path="${1:-}"
+cert_pass="${2:-}"
+profile_path="${3:-}"
+
+# Prompts
+if [[ -z "${cert_path}" ]]; then
+  say "🔐 Please provide the path to your signing certificate (.p12/.pfx/.pem/.cer/.der)."
+  read -r -p "Certificate file path: " cert_path
+fi
+if [[ -z "${cert_pass:-}" ]]; then
+  case "$(printf '%s' "$cert_path" | tolower)" in
+    *.p12|*.pfx)
+      say "🔑 Enter the password for the PKCS#12 certificate (blank if none)."
+      read -r -s -p "Certificate password: " cert_pass; say ""
+      ;;
+    *) cert_pass="";;
+  esac
+fi
+if [[ -z "${profile_path}" ]]; then
+  say "📄 Please provide the path to your provisioning profile (.mobileprovision/.provisionprofile)."
+  read -r -p "Provisioning profile path: " profile_path
+fi
+
+[[ -f "$cert_path" ]] || { say "❌ ERROR: Certificate not found: $cert_path"; exit 2; }
+[[ -f "$profile_path" ]] || { say "❌ ERROR: Provisioning profile not found: $profile_path"; exit 2; }
+
+tmpdir="$(mktemp -d)"; trap 'rm -rf "$tmpdir"' EXIT
+
+fingerprint_from_cert() {
+  local path="$1" pass="${2:-}"
+  local lc_path; lc_path=$(printf '%s' "$path" | tolower)
+
+  _print_fp() {
+    local f="$1" fmt="${2:-PEM}" obin="$3"
+    if [[ "$fmt" = "DER" ]]; then
+      "$obin" x509 -inform DER -in "$f" -noout -fingerprint -sha1 2>/dev/null \
+        | awk -F= '{print $2}' | normalize_fp
+    else
+      "$obin" x509 -in "$f" -noout -fingerprint -sha1 2>/dev/null \
+        | awk -F= '{print $2}' | normalize_fp
+    fi
+  }
+  _print_subject_stderr() {
+    local f="$1" fmt="${2:-PEM}" obin="$3"
+    if [[ "$fmt" = "DER" ]]; then
+      "$obin" x509 -inform DER -in "$f" -noout -subject 1>/dev/null 2>/dev/null || true
+      "$obin" x509 -inform DER -in "$f" -noout -subject 2>/dev/null >&2 || true
+    else
+      "$obin" x509 -in "$f" -noout -subject 1>/dev/null 2>/dev/null || true
+      "$obin" x509 -in "$f" -noout -subject 2>/dev/null >&2 || true
+    fi
+  }
+
+  case "$lc_path" in
+    *.p12|*.pfx)
+      # Try normal then -legacy (OpenSSL 3 & RC2/old ciphers)
+      if "$OSSL_BIN" pkcs12 -in "$path" -clcerts -nokeys -passin "pass:$pass" -out "$tmpdir/cert.pem" >/dev/null 2>"$tmpdir/p12.err" \
+      || "$OSSL_BIN" pkcs12 -legacy -in "$path" -clcerts -nokeys -passin "pass:$pass" -out "$tmpdir/cert.pem" >/dev/null 2>>"$tmpdir/p12.err"
+      then
+        [[ "$DEBUG" == "1" ]] && { say "🔎 Your cert subject:"; _print_subject_stderr "$tmpdir/cert.pem" "PEM" "$OSSL_BIN"; }
+        _print_fp "$tmpdir/cert.pem" "PEM" "$OSSL_BIN"; return 0
+      fi
+      say "❌ ERROR: Unable to load PKCS#12 (wrong password or legacy cipher unsupported)."
+      sed -n '1,120p' "$tmpdir/p12.err" >&2 || true
+      return 1
+      ;;
+  esac
+
+  if "$OSSL_BIN" x509 -in "$path" -noout -fingerprint -sha1 >/dev/null 2>&1; then
+    [[ "$DEBUG" == "1" ]] && { say "🔎 Your cert subject:"; _print_subject_stderr "$path" "PEM" "$OSSL_BIN"; }
+    _print_fp "$path" "PEM" "$OSSL_BIN"; return 0
+  fi
+  if "$OSSL_BIN" x509 -inform DER -in "$path" -noout -fingerprint -sha1 >/dev/null 2>&1; then
+    [[ "$DEBUG" == "1" ]] && { say "🔎 Your cert subject:"; _print_subject_stderr "$path" "DER" "$OSSL_BIN"; }
+    _print_fp "$path" "DER" "$OSSL_BIN"; return 0
+  fi
+  return 1
+}
+
+cert_fp="$(fingerprint_from_cert "$cert_path" "$cert_pass" || true)"
+if [[ -z "$cert_fp" ]]; then
+  say "❌ ERROR: Could not extract fingerprint from certificate."
+  exit 2
+fi
+
+# Decode profile
+plist="$tmpdir/profile.plist"
+security cms -D -i "$profile_path" > "$plist"
+
+# Count embedded certs
+count=$(
+  plutil -extract DeveloperCertificates xml1 -o - "$plist" 2>/dev/null \
+  | xmllint --xpath 'count(//array/data)' - 2>/dev/null || echo 0
+)
+[[ "$DEBUG" == "1" ]] && say "🔢 Embedded DeveloperCertificates: $count"
+
+# Helper: try reading DER with preferred OpenSSL, then alternate if available
+alt_ossl=""
+for alt in /usr/bin/openssl "$(command -v openssl 2>/dev/null || true)"; do
+  [[ -n "$alt" && "$alt" != "$OSSL_BIN" && -x "$alt" ]] && { alt_ossl="$alt"; break; }
+done
+
+i=0; match=""
+while [[ $i -lt ${count%.*} ]]; do
+  cert_der="$tmpdir/embedded_$i.der"
+  if ! plutil -extract "DeveloperCertificates.$i" raw -o "$cert_der" "$plist" 2>/dev/null; then
+    break
+  fi
+
+  emb_fp="$("$OSSL_BIN" x509 -inform DER -in "$cert_der" -noout -fingerprint -sha1 2>/dev/null \
+            | awk -F= '{print $2}' | normalize_fp || true)"
+  if [[ -z "$emb_fp" && -n "$alt_ossl" ]]; then
+    emb_fp="$("$alt_ossl" x509 -inform DER -in "$cert_der" -noout -fingerprint -sha1 2>/dev/null \
+              | awk -F= '{print $2}' | normalize_fp || true)"
+  fi
+
+  if [[ "$DEBUG" == "1" ]]; then
+    subj="$("$OSSL_BIN" x509 -inform DER -in "$cert_der" -noout -subject 2>/dev/null || true)"
+    [[ -z "$subj" && -n "$alt_ossl" ]] && subj="$("$alt_ossl" x509 -inform DER -in "$cert_der" -noout -subject 2>/dev/null || true)"
+    say "   • cert[$i] $subj"
+    say "     SHA-1: ${emb_fp:-<unreadable>}"
+  fi
+
+  if [[ -n "$emb_fp" && "$emb_fp" == "$cert_fp" ]]; then match="$emb_fp"; break; fi
+  i=$((i+1))
+done
+
+# Context + result
+profile_name=$(plutil -extract Name xml1 -o - "$plist" 2>/dev/null \
+               | xmllint --xpath 'string(//string)' - 2>/dev/null || true)
+team_id=$(plutil -extract TeamIdentifier.0 xml1 -o - "$plist" 2>/dev/null \
+          | xmllint --xpath 'string(//string)' - 2>/dev/null || true)
+[[ -n "$profile_name" ]] && echo "📌 Profile Name: $profile_name"
+[[ -n "$team_id" ]] && echo "👥 Team ID: $team_id"
+
+if [[ -n "$match" ]]; then
+  echo "✅ MATCH (SHA-1: $match)"
+  exit 0
+else
+  echo "❌ NO MATCH (Cert SHA-1: $cert_fp)"
+  [[ "$DEBUG" == "0" ]] && echo "   Tip: run with --debug to print embedded cert subjects & hashes."
+  exit 1
+fi
