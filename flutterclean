@@ -1,0 +1,324 @@
+#!/bin/bash
+
+# USAGE: Recursively searches for pubspec.yaml files under current directory and cleans Flutter/Dart projects.
+
+# Print script usage
+print_usage() {
+    echo "Usage: $0 [directory]"
+    echo "If directory is not specified, current directory will be used."
+    echo "The script will recursively search for pubspec.yaml files and clean Flutter/Dart projects by:"
+    echo "  - Deleting 'build' directories"
+    echo "  - Deleting '.dart_tool' directories"
+    echo "  - Deleting 'pubspec.lock' files (only if not tracked in git)"
+    echo "  - Cleaning nested project directories"
+}
+
+# Get project name from pubspec file
+get_project_name() {
+    local pubspec_path="$1"
+    grep "^name:" "$pubspec_path" | sed 's/name:[[:space:]]*//g' | head -1
+}
+
+# Check if a file is tracked in git
+is_git_tracked() {
+    local file_path="$1"
+    local project_dir="$2"
+    
+    # Check if project directory is a git repo
+    if ! (cd "$project_dir" && git rev-parse --git-dir > /dev/null 2>&1); then
+        return 1  # Not a git repo, so file is not tracked
+    fi
+    
+    # Check if file is tracked in git
+    (cd "$project_dir" && git ls-files --error-unmatch "$file_path" > /dev/null 2>&1)
+}
+
+# Convert bytes to human-readable format
+bytes_to_human() {
+    local bytes=$1
+    if [ -z "$bytes" ] || [ "$bytes" -eq 0 ]; then
+        echo "0 B"
+        return
+    fi
+    
+    local kb=$((bytes / 1024))
+    local mb=$((kb / 1024))
+    local gb=$((mb / 1024))
+    
+    if [ $gb -gt 0 ]; then
+        awk "BEGIN {printf \"%.2f GB\", $bytes / (1024*1024*1024)}"
+    elif [ $mb -gt 0 ]; then
+        awk "BEGIN {printf \"%.2f MB\", $bytes / (1024*1024)}"
+    elif [ $kb -gt 0 ]; then
+        awk "BEGIN {printf \"%.2f KB\", $bytes / 1024}"
+    else
+        echo "${bytes} B"
+    fi
+}
+
+# Calculate size of a directory or file
+calculate_size() {
+    local path="$1"
+    if [ -e "$path" ]; then
+        # Use du -sb for accurate byte count (works on macOS and Linux)
+        if command -v du >/dev/null 2>&1; then
+            # On macOS, du -sb might not work, use du -sk and convert
+            if du -sb "$path" >/dev/null 2>&1; then
+                du -sb "$path" 2>/dev/null | awk '{print $1}'
+            else
+                # Fallback: use du -sk (kilobytes) and convert to bytes
+                local kb=$(du -sk "$path" 2>/dev/null | awk '{print $1}')
+                echo $((kb * 1024))
+            fi
+        else
+            echo "0"
+        fi
+    else
+        echo "0"
+    fi
+}
+
+# Clean a single project directory and return size cleaned in bytes
+clean_project() {
+    local project_dir="$1"
+    local success=0
+    local result
+    local total_size=0
+    local size
+    
+    # Change to project directory
+    cd "$project_dir" || return 1
+    
+    # Delete "build" directory
+    if [ -d "build" ]; then
+        size=$(calculate_size "build")
+        total_size=$((total_size + size))
+        rm -rf "build" 2>/dev/null
+        result=$?
+        if [ $result -ne 0 ]; then
+            success=$result
+        fi
+    fi
+    
+    # Delete ".dart_tool" directory
+    if [ -d ".dart_tool" ]; then
+        size=$(calculate_size ".dart_tool")
+        total_size=$((total_size + size))
+        rm -rf ".dart_tool" 2>/dev/null
+        result=$?
+        if [ $result -ne 0 ]; then
+            success=$result
+        fi
+    fi
+    
+    # Delete "Pubspec.lock" only if not tracked in git
+    if [ -f "Pubspec.lock" ]; then
+        # Get relative path from project root
+        local pubspec_lock_path="Pubspec.lock"
+        if ! is_git_tracked "$pubspec_lock_path" "$project_dir"; then
+            size=$(calculate_size "Pubspec.lock")
+            total_size=$((total_size + size))
+            rm -f "Pubspec.lock" 2>/dev/null
+            result=$?
+            if [ $result -ne 0 ]; then
+                success=$result
+            fi
+        fi
+    fi
+    
+    # Also check for lowercase "pubspec.lock" (common case)
+    if [ -f "pubspec.lock" ]; then
+        local pubspec_lock_path="pubspec.lock"
+        if ! is_git_tracked "$pubspec_lock_path" "$project_dir"; then
+            size=$(calculate_size "pubspec.lock")
+            total_size=$((total_size + size))
+            rm -f "pubspec.lock" 2>/dev/null
+            result=$?
+            if [ $result -ne 0 ]; then
+                success=$result
+            fi
+        fi
+    fi
+    
+    # Delete any nested "build" directories in subdirectories that are Flutter/Dart projects
+    # Find all pubspec.yaml files in subdirectories and delete their build directories
+    while IFS= read -r -d '' nested_pubspec; do
+        local nested_dir
+        nested_dir=$(dirname "$nested_pubspec")
+        if [ -d "$nested_dir/build" ]; then
+            size=$(calculate_size "$nested_dir/build")
+            total_size=$((total_size + size))
+            rm -rf "$nested_dir/build" 2>/dev/null
+            result=$?
+            if [ $result -ne 0 ]; then
+                success=$result
+            fi
+        fi
+    done < <(find . -mindepth 2 \( -name "pubspec.yaml" -o -name "pubspec.yml" \) -print0 2>/dev/null)
+    
+    # Output the size to stdout (will be captured separately)
+    echo "$total_size"
+    
+    return $success
+}
+
+# Spinner animation
+show_spinner() {
+    local pid=$1
+    local padded_name=$2
+    local rel_path=$3
+    local col_width=$4
+    local spinner=( '⠋' '⠙' '⠹' '⠸' '⠼' '⠴' '⠦' '⠧' '⠇' '⠏' )
+    local i=0
+    local blue=$'\033[34m'
+    local grey=$'\033[90m'
+    local reset=$'\033[0m'
+
+    while kill -0 "$pid" 2>/dev/null; do
+        printf "\r${blue}${spinner[$((i % ${#spinner[@]}))]}${reset} ${blue}%s${reset} ${grey}:%s${reset}" "$padded_name" "$rel_path"
+        ((i++))
+        sleep 0.1
+    done
+}
+
+# Process a directory
+process_directory() {
+    local dir="$1"
+    local count=0
+    local errors=0
+    local max_name_length=0
+    local total_bytes_freed=0
+
+    # First pass: find all projects and calculate max name length
+    local -a projects=()
+    while IFS= read -r -d '' pubspec_path; do
+        local project_dir
+        project_dir=$(dirname "$pubspec_path")
+        local project_name
+        project_name=$(get_project_name "$pubspec_path")
+
+        projects+=("$pubspec_path")
+
+        # Track max length
+        if (( ${#project_name} > max_name_length )); then
+            max_name_length=${#project_name}
+        fi
+    done < <(find "$dir" \( -name "pubspec.yaml" -o -name "pubspec.yml" \) -print0)
+
+    # Add padding (10-15 spaces)
+    max_name_length=$((max_name_length + 12))
+
+    # Print header - match exact format of data rows for alignment
+    local grey=$'\033[90m'
+    local reset=$'\033[0m'
+    # Use same format as data rows with fixed-width status (7 chars) + space
+    # Status codes are padded to 7 chars, so header should match
+    # Freed column: 12 chars for human-readable sizes like "123.45 MB"
+    printf "${grey}%-7s${reset} ${grey}%-${max_name_length}s${reset} ${grey}%-12s${reset} ${grey}:%s${reset}\n" "Status" "Project Name" "Freed" "Path"
+    
+    # Second pass: process all projects
+    for pubspec_path in "${projects[@]}"; do
+        count=$((count + 1))
+        local project_dir
+        project_dir=$(dirname "$pubspec_path")
+
+        # Get relative path from target directory
+        local rel_path
+        rel_path=$(python3 -c "import os.path; print(os.path.relpath('$project_dir', '$dir'))" 2>/dev/null || echo "$project_dir")
+
+        # Get project name from pubspec
+        local project_name
+        project_name=$(get_project_name "$pubspec_path")
+
+        # Color codes
+        local green=$'\033[32m'
+        local red=$'\033[31m'
+        local grey=$'\033[90m'
+        local reset=$'\033[0m'
+
+        # Create padded project name (without colon)
+        local padded_name
+        printf -v padded_name "%-${max_name_length}s" "$project_name"
+
+        # Create temp file to capture size output
+        local size_file
+        size_file=$(mktemp /tmp/flutterclean_size.XXXXXX 2>/dev/null || echo "/tmp/flutterclean_size_$$_$count")
+
+        # Run clean command in background, capturing size output
+        (clean_project "$project_dir" 2>/dev/null > "$size_file"; echo $? > "${size_file}.exit") &
+        local pid=$!
+
+        # Show spinner while process runs
+        show_spinner $pid "$padded_name" "$rel_path" "$max_name_length"
+
+        # Wait for process and capture result
+        wait $pid 2>/dev/null
+        local exit_code=$(cat "${size_file}.exit" 2>/dev/null || echo "1")
+        local size_bytes=$(cat "$size_file" 2>/dev/null || echo "0")
+        rm -f "$size_file" "${size_file}.exit" 2>/dev/null
+
+        # Convert size to human-readable format
+        local size_human
+        size_human=$(bytes_to_human "$size_bytes")
+        
+        # Create padded size (12 chars) for alignment
+        local padded_size
+        printf -v padded_size "%-12s" "$size_human"
+
+        # Add to total
+        total_bytes_freed=$((total_bytes_freed + size_bytes))
+
+        # Check result and replace spinner with status
+        # Pad status codes to fixed width (7 chars) for alignment
+        if [ "$exit_code" -eq 0 ]; then
+            printf "\r${green}%-7s${reset} ${green}%s${reset} ${grey}%s${reset} ${grey}:%s${reset}\n" "[ok]" "$padded_name" "$padded_size" "$rel_path"
+        else
+            printf "\r${red}%-7s${reset} ${red}%s${reset} ${grey}%s${reset} ${grey}:%s${reset}\n" "[error]" "$padded_name" "$padded_size" "$rel_path"
+            errors=$((errors + 1))
+        fi
+
+    done
+
+    # Print summary
+    local total_size_human
+    total_size_human=$(bytes_to_human "$total_bytes_freed")
+    
+    echo ""
+    echo "Summary:"
+    echo "Total projects found: $count"
+    if [ $errors -eq 0 ]; then
+        echo "All projects cleaned successfully!"
+    else
+        echo "Failed clean operations: $errors"
+        echo "Successful clean operations: $((count - errors))"
+    fi
+    echo "Total storage freed: $total_size_human"
+    echo "----------------------------------------"
+}
+
+# Main script
+
+# Show help if requested
+if [ "$1" = "-h" ] || [ "$1" = "--help" ]; then
+    print_usage
+    exit 0
+fi
+
+# Get target directory
+target_dir="${1:-.}"
+
+# Verify directory exists
+if [ ! -d "$target_dir" ]; then
+    echo "Error: Directory '$target_dir' does not exist"
+    exit 1
+fi
+
+# Convert to absolute path
+target_dir=$(cd "$target_dir" && pwd)
+
+echo "----------------------------------------"
+echo "Starting Flutter clean in: $target_dir"
+echo "----------------------------------------"
+
+# Process the directory
+process_directory "$target_dir"

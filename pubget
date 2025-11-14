@@ -1,5 +1,7 @@
 #!/bin/bash
 
+# USAGE: Recursively searches for pubspec.yaml files under current directory and run 'flutter pub get' or 'dart pub get' based on dependencies.
+
 # Print script usage
 print_usage() {
     echo "Usage: $0 [directory]"
@@ -32,6 +34,35 @@ get_project_name() {
     grep "^name:" "$pubspec_path" | sed 's/name:[[:space:]]*//g' | head -1
 }
 
+# Convert seconds to human-readable format
+seconds_to_human() {
+    local seconds=$1
+    if [ -z "$seconds" ] || [ "$seconds" -eq 0 ]; then
+        echo "0s"
+        return
+    fi
+    
+    local hours=$((seconds / 3600))
+    local minutes=$(((seconds % 3600) / 60))
+    local secs=$((seconds % 60))
+    
+    if [ $hours -gt 0 ]; then
+        if [ $minutes -gt 0 ]; then
+            echo "${hours}h ${minutes}m"
+        else
+            echo "${hours}h"
+        fi
+    elif [ $minutes -gt 0 ]; then
+        if [ $secs -gt 0 ]; then
+            echo "${minutes}m ${secs}s"
+        else
+            echo "${minutes}m"
+        fi
+    else
+        echo "${secs}s"
+    fi
+}
+
 # Spinner animation
 show_spinner() {
     local pid=$1
@@ -57,6 +88,7 @@ process_directory() {
     local count=0
     local errors=0
     local max_name_length=0
+    local total_time=0
 
     # First pass: find all projects and calculate max name length
     local -a projects=()
@@ -77,6 +109,14 @@ process_directory() {
     # Add padding (10-15 spaces)
     max_name_length=$((max_name_length + 12))
 
+    # Print header - match exact format of data rows for alignment
+    local grey=$'\033[90m'
+    local reset=$'\033[0m'
+    # Use same format as data rows with fixed-width status (7 chars) + space
+    # Status codes are padded to 7 chars, so header should match
+    # Time column: 8 chars for human-readable times like "2m 5s" or "1h 2m"
+    printf "${grey}%-7s${reset} ${grey}%-${max_name_length}s${reset} ${grey}%-8s${reset} ${grey}:%s${reset}\n" "Status" "Project Name" "Time" "Path"
+    
     # Second pass: process all projects
     for pubspec_path in "${projects[@]}"; do
         count=$((count + 1))
@@ -108,6 +148,10 @@ process_directory() {
         local padded_name
         printf -v padded_name "%-${max_name_length}s" "$project_name"
 
+        # Record start time
+        local start_time
+        start_time=$(date +%s 2>/dev/null || echo "0")
+
         # Run command in background
         (cd "$project_dir" && eval "$command" > /dev/null 2>&1) &
         local pid=$!
@@ -115,17 +159,39 @@ process_directory() {
         # Show spinner while process runs
         show_spinner $pid "$padded_name" "$rel_path" "$max_name_length"
 
+        # Wait for process and record end time
+        local exit_code=0
+        wait $pid 2>/dev/null || exit_code=$?
+        local end_time
+        end_time=$(date +%s 2>/dev/null || echo "0")
+        
+        # Calculate duration
+        local duration=$((end_time - start_time))
+        local time_human
+        time_human=$(seconds_to_human "$duration")
+        
+        # Add to total time
+        total_time=$((total_time + duration))
+        
+        # Create padded time (8 chars) for alignment
+        local padded_time
+        printf -v padded_time "%-8s" "$time_human"
+
         # Check result and replace spinner with status
-        if wait $pid; then
-            printf "\r${green}[ok]${reset} ${green}%s${reset} ${grey}:%s${reset}\n" "$padded_name" "$rel_path"
+        # Pad status codes to fixed width (7 chars) for alignment
+        if [ $exit_code -eq 0 ]; then
+            printf "\r${green}%-7s${reset} ${green}%s${reset} ${grey}%s${reset} ${grey}:%s${reset}\n" "[ok]" "$padded_name" "$padded_time" "$rel_path"
         else
-            printf "\r${red}[error]${reset} ${red}%s${reset} ${grey}:%s${reset}\n" "$padded_name" "$rel_path"
+            printf "\r${red}%-7s${reset} ${red}%s${reset} ${grey}%s${reset} ${grey}:%s${reset}\n" "[error]" "$padded_name" "$padded_time" "$rel_path"
             errors=$((errors + 1))
         fi
 
     done
 
     # Print summary
+    local total_time_human
+    total_time_human=$(seconds_to_human "$total_time")
+    
     echo ""
     echo "Summary:"
     echo "Total projects found: $count"
@@ -135,6 +201,7 @@ process_directory() {
         echo "Failed updates: $errors"
         echo "Successful updates: $((count - errors))"
     fi
+    echo "Total time taken: $total_time_human"
     echo "----------------------------------------"
 }
 

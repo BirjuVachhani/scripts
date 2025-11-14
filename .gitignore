@@ -31,3 +31,5 @@ doc/api/
 
 .idea/
 
+# Ignore local scripts directory. This allows you to add your own scripts to this directory and keep them local to your machine.
+local/

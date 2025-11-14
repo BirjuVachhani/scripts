@@ -1,0 +1,278 @@
+#!/bin/bash
+
+# USAGE: scripts [command]
+# This script provides git operations for the scripts repository
+
+# Colors for rich console output
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+CYAN='\033[0;36m'
+ORANGE='\033[38;5;208m'  # Orange color (256-color mode, falls back gracefully)
+GREY='\033[0;90m'  # Grey color for descriptions
+BOLD='\033[1m'
+NC='\033[0m' # No Color
+
+# Print script usage
+print_usage() {
+    echo ""
+    echo -e "${BOLD}${CYAN}scripts${NC} - Git operations for scripts repository"
+    echo ""
+    echo -e "${BOLD}Usage:${NC}"
+    echo "  scripts [command]"
+    echo ""
+    echo -e "${BOLD}Commands:${NC}"
+    echo -e "  ${GREEN}update${NC}    Pull latest changes from remote repository, discarding local changes"
+    echo -e "  ${GREEN}push${NC}       Stage, commit, and push local changes to remote repository"
+    echo -e "  ${GREEN}ls${NC}         List all available scripts in main, local, and custom directories"
+    echo -e "  ${GREEN}--help${NC}     Show this help message"
+    echo ""
+    echo -e "${BOLD}Examples:${NC}"
+    echo "  scripts update"
+    echo "  scripts push"
+    echo "  scripts ls"
+    echo "  scripts --help"
+    echo ""
+}
+
+# Print formatted log message
+log_info() {
+    echo -e "${BLUE}ℹ${NC} $1"
+}
+
+log_success() {
+    echo -e "${GREEN}✓${NC} $1"
+}
+
+log_error() {
+    echo -e "${RED}✗${NC} $1"
+}
+
+log_warning() {
+    echo -e "${YELLOW}⚠${NC} $1"
+}
+
+# Check if we're in a git repository
+check_git_repo() {
+    if ! git rev-parse --git-dir > /dev/null 2>&1; then
+        log_error "Not a git repository. Please run this command from within a git repository."
+        exit 1
+    fi
+}
+
+# Update command: Pull changes discarding local changes
+update_repository() {
+    check_git_repo
+    
+    echo ""
+    echo -e "${BOLD}${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    echo -e "${BOLD}${CYAN}  Updating Repository${NC}"
+    echo -e "${BOLD}${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    echo ""
+    
+    log_info "Checking current branch..."
+    current_branch=$(git branch --show-current)
+    echo -e "  Current branch: ${BOLD}${current_branch}${NC}"
+    echo ""
+    
+    log_warning "This will discard all local changes and pull from remote."
+    log_info "Fetching latest changes from remote..."
+    
+    if ! git fetch origin; then
+        log_error "Failed to fetch from remote repository"
+        exit 1
+    fi
+    
+    log_success "Successfully fetched from remote"
+    echo ""
+    
+    log_info "Resetting local branch to match remote (discarding local changes)..."
+    
+    if ! git reset --hard origin/"$current_branch"; then
+        log_error "Failed to reset local branch"
+        exit 1
+    fi
+    
+    log_success "Successfully reset local branch to match remote"
+    echo ""
+    
+    log_info "Cleaning untracked files..."
+    git clean -fd
+    
+    echo ""
+    echo -e "${BOLD}${GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    log_success "Repository updated successfully!"
+    echo -e "${BOLD}${GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    echo ""
+}
+
+# List scripts command: List all available scripts
+list_scripts() {
+    SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+    LOCAL_DIR="$HOME/.scripts/local"
+    CUSTOM_DIR="$HOME/.scripts/custom"
+    
+    # Function to extract USAGE description from a file
+    extract_usage() {
+        local file_path="$1"
+        # Read first 5 lines and look for "# USAGE:"
+        local usage_line
+        usage_line=$(head -n 5 "$file_path" 2>/dev/null | grep -m 1 "^# USAGE:")
+        if [ -n "$usage_line" ]; then
+            # Remove "# USAGE:" prefix and trim whitespace
+            usage_line="${usage_line#\# USAGE:}"
+            usage_line="${usage_line#"${usage_line%%[![:space:]]*}"}"  # trim leading whitespace
+            usage_line="${usage_line%"${usage_line##*[![:space:]]}"}"   # trim trailing whitespace
+            printf '%s' "$usage_line"
+        fi
+    }
+    
+    # Function to check and display a script file
+    check_script_file() {
+        local file_path="$1"
+        local file_name=$(basename "$file_path")
+        
+        # Exclude install.sh and scripts itself
+        if [ "$file_name" = "install.sh" ] || [ "$file_name" = "scripts" ]; then
+            return
+        fi
+        
+        # Check if file starts with "#!/bin/"
+        if head -n 1 "$file_path" 2>/dev/null | grep -q "^#!/bin/"; then
+            # Extract usage description
+            local description=$(extract_usage "$file_path")
+            
+            # Check if file is executable
+            if [ -x "$file_path" ]; then
+                if [ -n "$description" ]; then
+                    echo -e "  - ${GREEN}${file_name}${NC}"
+                    echo -e "    ${GREY}${description}${NC}"
+                else
+                    echo -e "  - ${GREEN}${file_name}${NC}"
+                fi
+            else
+                if [ -n "$description" ]; then
+                    echo -e "  - ${ORANGE}${file_name}${NC} ${YELLOW}(not executable)${NC}"
+                    echo -e "    ${GREY}${description}${NC}"
+                else
+                    echo -e "  - ${ORANGE}${file_name}${NC} ${YELLOW}(not executable)${NC}"
+                fi
+            fi
+        fi
+    }
+    
+    # Check main scripts directory
+    if [ -d "$SCRIPT_DIR" ]; then
+        for file in "$SCRIPT_DIR"/*; do
+            if [ -f "$file" ]; then
+                check_script_file "$file"
+            fi
+        done
+    fi
+    
+    # Check local scripts directory
+    if [ -d "$LOCAL_DIR" ]; then
+        for file in "$LOCAL_DIR"/*; do
+            if [ -f "$file" ]; then
+                check_script_file "$file"
+            fi
+        done
+    fi
+    
+    # Check custom scripts directory
+    if [ -d "$CUSTOM_DIR" ]; then
+        for file in "$CUSTOM_DIR"/*; do
+            if [ -f "$file" ]; then
+                check_script_file "$file"
+            fi
+        done
+    fi
+}
+
+# Push command: Add, commit, and push changes
+push_repository() {
+    check_git_repo
+    
+    echo ""
+    echo -e "${BOLD}${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    echo -e "${BOLD}${CYAN}  Pushing Changes to Repository${NC}"
+    echo -e "${BOLD}${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    echo ""
+    
+    log_info "Checking repository status..."
+    current_branch=$(git branch --show-current)
+    echo -e "  Current branch: ${BOLD}${current_branch}${NC}"
+    echo ""
+    
+    # Check if there are any changes to commit
+    if git diff --quiet && git diff --cached --quiet && [ -z "$(git ls-files --others --exclude-standard)" ]; then
+        log_warning "No changes to commit. Repository is up to date."
+        echo ""
+        exit 0
+    fi
+    
+    log_info "Staging all changes..."
+    if ! git add -A; then
+        log_error "Failed to stage changes"
+        exit 1
+    fi
+    
+    staged_count=$(git diff --cached --name-only | wc -l | tr -d ' ')
+    log_success "Staged $staged_count file(s)"
+    echo ""
+    
+    log_info "Creating commit..."
+    commit_message="Update scripts repository"
+    
+    if ! git commit -m "$commit_message"; then
+        log_error "Failed to create commit"
+        exit 1
+    fi
+    
+    log_success "Commit created successfully"
+    echo ""
+    
+    log_info "Pushing changes to remote repository..."
+    if ! git push origin "$current_branch"; then
+        log_error "Failed to push to remote repository"
+        exit 1
+    fi
+    
+    log_success "Successfully pushed to remote repository"
+    echo ""
+    
+    echo -e "${BOLD}${GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    log_success "All changes pushed successfully!"
+    echo -e "${BOLD}${GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    echo ""
+}
+
+# Main script logic
+case "$1" in
+    update)
+        update_repository
+        ;;
+    push)
+        push_repository
+        ;;
+    ls)
+        list_scripts
+        ;;
+    --help|-h|help)
+        print_usage
+        ;;
+    "")
+        log_error "No command specified"
+        echo ""
+        print_usage
+        exit 1
+        ;;
+    *)
+        log_error "Unknown command: $1"
+        echo ""
+        print_usage
+        exit 1
+        ;;
+esac
+
