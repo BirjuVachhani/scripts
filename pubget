@@ -2,210 +2,55 @@
 
 # USAGE: Recursively searches for pubspec.yaml files under current directory and run 'flutter pub get' or 'dart pub get' based on dependencies.
 
+# ==============================================================================
+# LOAD CORE UTILITIES
+# ==============================================================================
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+CORE_LIB="$SCRIPT_DIR/core.sh"
+
+if [ ! -f "$CORE_LIB" ]; then
+    echo "Error: core.sh not found at $CORE_LIB"
+    echo "Please ensure core.sh is in the same directory as this script."
+    exit 1
+fi
+
+source "$CORE_LIB"
+
+# ==============================================================================
+# SCRIPT FUNCTIONS
+# ==============================================================================
+
 # Print script usage
 print_usage() {
-    echo "Usage: $0 [directory]"
-    echo "If directory is not specified, current directory will be used."
-    echo "The script will recursively search for pubspec.yaml files and run 'flutter pub get' or 'dart pub get' based on dependencies"
-}
-
-# Check if pubspec file has flutter SDK as dependency
-has_flutter_dependency() {
-    local pubspec_path="$1"
-
-    # Check if flutter is listed under dependencies or dev_dependencies
-    if grep -q "^\s*flutter:" "$pubspec_path"; then
-        return 0
-    fi
-    return 1
-}
-
-# Check if flutter is installed
-check_flutter() {
-    if ! command -v flutter &> /dev/null; then
-        echo "Error: Flutter is not installed or not in PATH"
-        exit 1
-    fi
-}
-
-# Get project name from pubspec file
-get_project_name() {
-    local pubspec_path="$1"
-    grep "^name:" "$pubspec_path" | sed 's/name:[[:space:]]*//g' | head -1
-}
-
-# Convert seconds to human-readable format
-seconds_to_human() {
-    local seconds=$1
-    if [ -z "$seconds" ] || [ "$seconds" -eq 0 ]; then
-        echo "0s"
-        return
-    fi
-    
-    local hours=$((seconds / 3600))
-    local minutes=$(((seconds % 3600) / 60))
-    local secs=$((seconds % 60))
-    
-    if [ $hours -gt 0 ]; then
-        if [ $minutes -gt 0 ]; then
-            echo "${hours}h ${minutes}m"
-        else
-            echo "${hours}h"
-        fi
-    elif [ $minutes -gt 0 ]; then
-        if [ $secs -gt 0 ]; then
-            echo "${minutes}m ${secs}s"
-        else
-            echo "${minutes}m"
-        fi
-    else
-        echo "${secs}s"
-    fi
-}
-
-# Spinner animation
-show_spinner() {
-    local pid=$1
-    local padded_name=$2
-    local rel_path=$3
-    local col_width=$4
-    local spinner=( '⠋' '⠙' '⠹' '⠸' '⠼' '⠴' '⠦' '⠧' '⠇' '⠏' )
-    local i=0
-    local blue=$'\033[34m'
-    local grey=$'\033[90m'
-    local reset=$'\033[0m'
-
-    while kill -0 "$pid" 2>/dev/null; do
-        printf "\r${blue}${spinner[$((i % ${#spinner[@]}))]}${reset} ${blue}%s${reset} ${grey}:%s${reset}" "$padded_name" "$rel_path"
-        ((i++))
-        sleep 0.1
-    done
-}
-
-# Process a directory
-process_directory() {
-    local dir="$1"
-    local count=0
-    local errors=0
-    local max_name_length=0
-    local total_time=0
-
-    # First pass: find all projects and calculate max name length
-    local -a projects=()
-    while IFS= read -r -d '' pubspec_path; do
-        local project_dir
-        project_dir=$(dirname "$pubspec_path")
-        local project_name
-        project_name=$(get_project_name "$pubspec_path")
-
-        projects+=("$pubspec_path")
-
-        # Track max length
-        if (( ${#project_name} > max_name_length )); then
-            max_name_length=${#project_name}
-        fi
-    done < <(find "$dir" \( -name "pubspec.yaml" -o -name "pubspec.yml" \) -print0)
-
-    # Add padding (10-15 spaces)
-    max_name_length=$((max_name_length + 12))
-
-    # Print header - match exact format of data rows for alignment
-    local grey=$'\033[90m'
-    local reset=$'\033[0m'
-    # Use same format as data rows with fixed-width status (7 chars) + space
-    # Status codes are padded to 7 chars, so header should match
-    # Time column: 8 chars for human-readable times like "2m 5s" or "1h 2m"
-    printf "${grey}%-7s${reset} ${grey}%-${max_name_length}s${reset} ${grey}%-8s${reset} ${grey}:%s${reset}\n" "Status" "Project Name" "Time" "Path"
-    
-    # Second pass: process all projects
-    for pubspec_path in "${projects[@]}"; do
-        count=$((count + 1))
-        local project_dir
-        project_dir=$(dirname "$pubspec_path")
-
-        # Get relative path from target directory
-        local rel_path
-        rel_path=$(python3 -c "import os.path; print(os.path.relpath('$project_dir', '$dir'))" 2>/dev/null || echo "$project_dir")
-
-        # Get project name from pubspec
-        local project_name
-        project_name=$(get_project_name "$pubspec_path")
-
-        # Check if flutter SDK is a dependency
-        if has_flutter_dependency "$pubspec_path"; then
-            local command="flutter pub get"
-        else
-            local command="dart pub get"
-        fi
-
-        # Color codes
-        local green=$'\033[32m'
-        local red=$'\033[31m'
-        local grey=$'\033[90m'
-        local reset=$'\033[0m'
-
-        # Create padded project name (without colon)
-        local padded_name
-        printf -v padded_name "%-${max_name_length}s" "$project_name"
-
-        # Record start time
-        local start_time
-        start_time=$(date +%s 2>/dev/null || echo "0")
-
-        # Run command in background
-        (cd "$project_dir" && eval "$command" > /dev/null 2>&1) &
-        local pid=$!
-
-        # Show spinner while process runs
-        show_spinner $pid "$padded_name" "$rel_path" "$max_name_length"
-
-        # Wait for process and record end time
-        local exit_code=0
-        wait $pid 2>/dev/null || exit_code=$?
-        local end_time
-        end_time=$(date +%s 2>/dev/null || echo "0")
-        
-        # Calculate duration
-        local duration=$((end_time - start_time))
-        local time_human
-        time_human=$(seconds_to_human "$duration")
-        
-        # Add to total time
-        total_time=$((total_time + duration))
-        
-        # Create padded time (8 chars) for alignment
-        local padded_time
-        printf -v padded_time "%-8s" "$time_human"
-
-        # Check result and replace spinner with status
-        # Pad status codes to fixed width (7 chars) for alignment
-        if [ $exit_code -eq 0 ]; then
-            printf "\r${green}%-7s${reset} ${green}%s${reset} ${grey}%s${reset} ${grey}:%s${reset}\n" "[ok]" "$padded_name" "$padded_time" "$rel_path"
-        else
-            printf "\r${red}%-7s${reset} ${red}%s${reset} ${grey}%s${reset} ${grey}:%s${reset}\n" "[error]" "$padded_name" "$padded_time" "$rel_path"
-            errors=$((errors + 1))
-        fi
-
-    done
-
-    # Print summary
-    local total_time_human
-    total_time_human=$(seconds_to_human "$total_time")
-    
     echo ""
-    echo "Summary:"
-    echo "Total projects found: $count"
-    if [ $errors -eq 0 ]; then
-        echo "All projects updated successfully!"
-    else
-        echo "Failed updates: $errors"
-        echo "Successful updates: $((count - errors))"
-    fi
-    echo "Total time taken: $total_time_human"
-    echo "----------------------------------------"
+    echo -e "${BOLD}${CYAN}pubget${NC} - Fetch dependencies for Flutter/Dart projects"
+    echo ""
+    echo -e "${BOLD}Usage:${NC}"
+    echo "  pubget [directories...]"
+    echo ""
+    echo -e "${BOLD}Arguments:${NC}"
+    echo -e "  ${GREEN}directories${NC}  One or more directories (defaults to current directory)"
+    echo ""
+    echo -e "${BOLD}Description:${NC}"
+    echo "  Recursively searches for pubspec.yaml files and runs 'flutter pub get'"
+    echo "  or 'dart pub get' based on project dependencies."
+    echo ""
+    echo -e "${BOLD}Examples:${NC}"
+    echo "  pubget                     # Run in current directory"
+    echo "  pubget common              # Run in ./common"
+    echo "  pubget common server       # Run in ./common and ./server"
+    echo "  pubget . common server     # Run in ., ./common, and ./server"
+    echo ""
+    echo -e "${BOLD}Configuration:${NC}"
+    echo "  - Exclude patterns: Edit .pubget-exclude in the scripts directory"
+    echo "  - Environment: Edit .env for PUB_GET_NO_EXAMPLE setting"
+    echo ""
 }
 
-# Main script
+# ==============================================================================
+# MAIN SCRIPT
+# ==============================================================================
 
 # Show help if requested
 if [ "$1" = "-h" ] || [ "$1" = "--help" ]; then
@@ -213,24 +58,157 @@ if [ "$1" = "-h" ] || [ "$1" = "--help" ]; then
     exit 0
 fi
 
-# Check if Flutter is installed
-check_flutter
+# Check if Flutter and Dart are installed
+require_command "flutter" "Flutter"
+require_command "dart" "Dart"
 
-# Get target directory
-target_dir="${1:-.}"
+# Store the original working directory for relative path display
+original_pwd="$PWD"
 
-# Verify directory exists
-if [ ! -d "$target_dir" ]; then
-    echo "Error: Directory '$target_dir' does not exist"
-    exit 1
+# Get target directories from arguments (default to current directory)
+if [ $# -eq 0 ]; then
+    target_dirs=(".")
+else
+    target_dirs=("$@")
 fi
 
-# Convert to absolute path
-target_dir=$(cd "$target_dir" && pwd)
+# Verify all directories exist
+for dir in "${target_dirs[@]}"; do
+    if [ ! -d "$dir" ]; then
+        log_error "Directory '$dir' does not exist"
+        exit 1
+    fi
+done
 
+# Collect all projects from all directories
+all_projects=()
+max_name_length=0
+
+for target_dir in "${target_dirs[@]}"; do
+    # Convert to absolute path
+    target_dir=$(cd "$target_dir" && pwd)
+
+    # Find all projects in this directory
+    find_cmd=$(build_find_command "$target_dir" "pubget")
+
+    while IFS= read -r -d '' pubspec_path; do
+        project_name=$(get_project_name "$pubspec_path")
+
+        # Store project info: pubspec_path
+        all_projects+=("$pubspec_path")
+
+        # Track max length
+        if (( ${#project_name} > max_name_length )); then
+            max_name_length=${#project_name}
+        fi
+    done < <(eval "$find_cmd")
+done
+
+# Return if no projects found
+if [ ${#all_projects[@]} -eq 0 ]; then
+    log_warning "No Flutter/Dart projects found"
+    exit 0
+fi
+
+# Add padding (10-15 spaces)
+max_name_length=$((max_name_length + 12))
+
+# Print header with directory info
 echo "----------------------------------------"
-echo "Starting Flutter dependencies update in: $target_dir"
+if [ ${#target_dirs[@]} -eq 1 ]; then
+    target_dir_display=$(relativePath "$original_pwd" "$(cd "${target_dirs[0]}" && pwd)")
+    echo "Starting Flutter dependencies update in: $target_dir_display"
+else
+    echo "Starting Flutter dependencies update in: ${#target_dirs[@]} directories"
+fi
 echo "----------------------------------------"
 
-# Process the directory
-process_directory "$target_dir"
+# Print table header
+printf "${GREY}%-7s${NC} ${GREY}%-${max_name_length}s${NC} ${GREY}%-8s${NC} ${GREY}:%s${NC}\n" "Status" "Project Name" "Time" "Path"
+
+# Process all projects
+count=0
+errors=0
+total_time=0
+
+for pubspec_path in "${all_projects[@]}"; do
+    count=$((count + 1))
+    project_dir=$(dirname "$pubspec_path")
+
+    # Get relative path from original working directory
+    rel_path=$(relativePath "$original_pwd" "$project_dir")
+
+    # Get project name from pubspec
+    project_name=$(get_project_name "$pubspec_path")
+
+    # Determine command based on Flutter dependency
+    if has_flutter_dependency "$pubspec_path"; then
+        command="flutter pub get"
+    else
+        command="dart pub get"
+    fi
+
+    # Add --no-example flag if configured (defaults to true if not set)
+    use_no_example="${PUB_GET_NO_EXAMPLE:-true}"
+    if [ "$use_no_example" = "true" ]; then
+        command="$command --no-example"
+    fi
+
+    # Create padded project name
+    printf -v padded_name "%-${max_name_length}s" "$project_name"
+
+    # Record start time
+    start_time=$(date +%s 2>/dev/null || echo "0")
+
+    # Run command in background
+    (cd "$project_dir" && eval "$command" > /dev/null 2>&1) &
+    pid=$!
+
+    # Show spinner while process runs
+    show_spinner $pid "$padded_name" "$rel_path"
+
+    # Wait for process and record end time
+    exit_code=0
+    wait $pid 2>/dev/null || exit_code=$?
+    end_time=$(date +%s 2>/dev/null || echo "0")
+
+    # Calculate duration
+    duration=$((end_time - start_time))
+    time_human=$(seconds_to_human "$duration")
+
+    # Add to total time
+    total_time=$((total_time + duration))
+
+    # Create padded time (8 chars) for alignment
+    printf -v padded_time "%-8s" "$time_human"
+
+    # Check result and replace spinner with status
+    if [ $exit_code -eq 0 ]; then
+        printf "\r${GREEN}%-7s${NC} ${GREEN}%s${NC} ${GREY}%s${NC} ${GREY}:%s${NC}\n" "[ok]" "$padded_name" "$padded_time" "$rel_path"
+    else
+        printf "\r${RED}%-7s${NC} ${RED}%s${NC} ${GREY}%s${NC} ${GREY}:%s${NC}\n" "[error]" "$padded_name" "$padded_time" "$rel_path"
+        errors=$((errors + 1))
+    fi
+done
+
+# Print summary
+total_time_human=$(seconds_to_human "$total_time")
+
+echo ""
+echo "Summary:"
+echo "Total projects found: $count"
+if [ $errors -eq 0 ]; then
+    echo "All projects updated successfully!"
+else
+    echo "Failed updates: $errors"
+    echo "Successful updates: $((count - errors))"
+fi
+echo "Total time taken: $total_time_human"
+echo "----------------------------------------"
+
+# Exit with appropriate code
+if [ $errors -gt 0 ]; then
+    exit 1
+else
+    exit 0
+fi

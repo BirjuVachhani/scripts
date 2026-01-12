@@ -45,5 +45,35 @@ echo "  Local scripts: $LOCAL_DIR"
 echo "  Custom scripts: $CUSTOM_DIR"
 echo "  Added to: $SHELL_CONFIG"
 echo ""
+
+# Handle .env file creation
+ENV_FILE="$SCRIPT_DIR/.env"
+ENV_SAMPLE="$SCRIPT_DIR/.env.sample"
+
+if [ -f "$ENV_FILE" ]; then
+    # .env already exists, ask if user wants to override
+    read -p "⚠ .env file already exists. Override with .env.sample? [y/N] " -n 1 -r
+    echo ""
+    if [[ $REPLY =~ ^[Yy]$ ]]; then
+        if [ -f "$ENV_SAMPLE" ]; then
+            cp "$ENV_SAMPLE" "$ENV_FILE"
+            echo "✓ .env file updated from .env.sample"
+        else
+            echo "⚠ Warning: .env.sample not found, keeping existing .env"
+        fi
+    else
+        echo "✓ Keeping existing .env file"
+    fi
+else
+    # .env doesn't exist, create it from .env.sample
+    if [ -f "$ENV_SAMPLE" ]; then
+        cp "$ENV_SAMPLE" "$ENV_FILE"
+        echo "✓ Created .env file from .env.sample"
+    else
+        echo "⚠ Warning: .env.sample not found, skipping .env creation"
+    fi
+fi
+
+echo ""
 echo "Please run 'source $SHELL_CONFIG' or restart your terminal to use the scripts."
 

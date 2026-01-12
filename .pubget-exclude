@@ -1,0 +1,6 @@
+# Folders to exclude from pubget scanning
+# Add one folder per line (relative path patterns)
+build
+.dart_tool
+Pods
+ephemeral

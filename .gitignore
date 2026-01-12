@@ -14,6 +14,9 @@ doc/api/
 # dotenv environment variables file
 .env*
 
+# Allow checking in a sample environment variables file.
+!.env.sample
+
 # Avoid committing generated Javascript files:
 *.dart.js
 # Produced by the --dump-info flag.

@@ -1,0 +1,7 @@
+# Folders to exclude from codegen scanning
+# Add one folder per line (relative path patterns)
+build
+.dart_tool
+Pods
+ephemeral
+.symlinks

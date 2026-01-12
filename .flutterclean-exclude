@@ -1,0 +1,5 @@
+# Folders to exclude from flutterclean scanning
+# Add one folder per line (relative path patterns)
+Pods
+.symlinks
+node_modules

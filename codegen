@@ -1,0 +1,253 @@
+#!/bin/bash
+
+# USAGE: codegen [directories...] - Run build_runner code generation for Flutter/Dart projects
+
+# ==============================================================================
+# LOAD CORE UTILITIES
+# ==============================================================================
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+CORE_LIB="$SCRIPT_DIR/core.sh"
+
+if [ ! -f "$CORE_LIB" ]; then
+    echo "Error: core.sh not found at $CORE_LIB"
+    echo "Please ensure core.sh is in the same directory as this script."
+    exit 1
+fi
+
+source "$CORE_LIB"
+
+# ==============================================================================
+# SCRIPT FUNCTIONS
+# ==============================================================================
+
+# Print script usage
+print_usage() {
+    echo ""
+    echo -e "${BOLD}${CYAN}codegen${NC} - Generate code with build_runner for Flutter/Dart projects"
+    echo ""
+    echo -e "${BOLD}Usage:${NC}"
+    echo "  codegen [directories...]"
+    echo "  codegen -a"
+    echo ""
+    echo -e "${BOLD}Arguments:${NC}"
+    echo -e "  ${GREEN}directories${NC}  One or more directories (defaults to current directory)"
+    echo -e "  ${GREEN}-a${NC}           Run recursively in all projects with build_runner"
+    echo ""
+    echo -e "${BOLD}Description:${NC}"
+    echo "  Runs build_runner code generation for projects with build_runner as"
+    echo "  a dev dependency. Automatically detects Flutter vs Dart projects."
+    echo ""
+    echo -e "${BOLD}Examples:${NC}"
+    echo "  codegen                    # Run in current directory"
+    echo "  codegen common             # Run in ./common"
+    echo "  codegen common server      # Run in ./common and ./server"
+    echo "  codegen . common server    # Run in ., ./common, and ./server"
+    echo "  codegen -a                 # Run in all projects recursively"
+    echo ""
+    echo -e "${BOLD}Configuration:${NC}"
+    echo "  - Exclude patterns: Edit .codegen-exclude in the scripts directory"
+    echo "  - Environment: Edit .env for BUILD_RUNNER_AOT setting"
+    echo ""
+}
+
+# Find all directories with pubspec files recursively
+find_all_projects() {
+    local base_dir="$1"
+    local found_dirs=()
+    local find_cmd
+    find_cmd=$(build_find_command "$base_dir" "codegen")
+
+    # Find all directories containing pubspec.yaml or pubspec.yml
+    while IFS= read -r -d '' pubspec_file; do
+        local dir=$(dirname "$pubspec_file")
+        found_dirs+=("$dir")
+    done < <(eval "$find_cmd")
+
+    # Return the directories
+    printf '%s\n' "${found_dirs[@]}"
+}
+
+# Run codegen for a single directory
+run_codegen_for_directory() {
+    local target_dir="$1"
+    local original_pwd="$2"
+
+    # Convert to absolute path for internal operations
+    target_dir=$(cd "$target_dir" && pwd)
+
+    # Calculate relative path for display
+    local target_dir_display=$(relativePath "$original_pwd" "$target_dir")
+
+    # Find pubspec file
+    local pubspec_path=$(find_pubspec "$target_dir")
+
+    if [ -z "$pubspec_path" ]; then
+        log_warning "No pubspec.yaml found in '$target_dir_display' - skipping"
+        return 1
+    fi
+
+    # Check if build_runner is a dev dependency
+    if ! has_build_runner "$pubspec_path"; then
+        return 1
+    fi
+
+    # Calculate relative path for pubspec display
+    local pubspec_path_display=$(relativePath "$original_pwd" "$pubspec_path")
+    # Ensure we show "./" prefix for current directory files
+    if [[ "$pubspec_path_display" != ./* ]] && [[ "$pubspec_path_display" != ../* ]]; then
+        pubspec_path_display="./$pubspec_path_display"
+    fi
+
+    # Get project name
+    local project_name=$(get_project_name "$pubspec_path")
+    if [ -n "$project_name" ]; then
+        echo -e "${GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+        echo -e "${GREEN}ℹ ${BOLD}$project_name${NC} ${GREEN}($pubspec_path_display)${NC}"
+        echo -e "${GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    fi
+
+    # Determine project type and command
+    local command
+    if has_flutter_dependency "$pubspec_path"; then
+        command="flutter pub run build_runner build --delete-conflicting-outputs"
+
+        # Check if flutter is installed
+        if ! command -v flutter &> /dev/null; then
+            log_error "Flutter is not installed or not in PATH"
+            return 1
+        fi
+    else
+        command="dart run build_runner build --delete-conflicting-outputs"
+
+        # Check if dart is installed
+        if ! command -v dart &> /dev/null; then
+            log_error "Dart is not installed or not in PATH"
+            return 1
+        fi
+    fi
+
+    # Add AOT flag if configured (defaults to true if not set)
+    local use_aot="${BUILD_RUNNER_AOT:-true}"
+    if [ "$use_aot" = "true" ]; then
+        command="$command --force-aot"
+        echo -e "${GREY}Using AOT compilation (BUILD_RUNNER_AOT=${use_aot})${NC}"
+    fi
+
+    echo ""
+
+    # Change to target directory and run command
+    (cd "$target_dir" && eval "$command")
+    local exit_code=$?
+
+    echo ""
+
+    if [ $exit_code -eq 0 ]; then
+        log_success "Code generation completed for $target_dir_display"
+        echo ""
+        return 0
+    else
+        log_error "Code generation failed for $target_dir_display"
+        echo ""
+        return 1
+    fi
+}
+
+# ==============================================================================
+# MAIN SCRIPT
+# ==============================================================================
+
+# Show help if requested
+if [ "$1" = "-h" ] || [ "$1" = "--help" ]; then
+    print_usage
+    exit 0
+fi
+
+# Store the original working directory for relative path display
+original_pwd="$PWD"
+
+# Check for -a flag (run all)
+if [ "$1" = "-a" ]; then
+    log_info "Searching for all Flutter/Dart projects..."
+
+    # Find all project directories
+    mapfile -t all_dirs < <(find_all_projects ".")
+
+    if [ ${#all_dirs[@]} -eq 0 ]; then
+        log_error "No Flutter/Dart projects found"
+        exit 1
+    fi
+
+    # Filter directories that have build_runner
+    target_dirs=()
+    for dir in "${all_dirs[@]}"; do
+        pubspec_path=$(find_pubspec "$dir")
+        if [ -n "$pubspec_path" ] && has_build_runner "$pubspec_path"; then
+            target_dirs+=("$dir")
+        fi
+    done
+
+    if [ ${#target_dirs[@]} -eq 0 ]; then
+        log_error "No projects with build_runner found"
+        exit 1
+    fi
+
+    log_info "Found ${#target_dirs[@]} project(s) with build_runner"
+    echo ""
+else
+    # Get target directories from arguments (default to current directory)
+    if [ $# -eq 0 ]; then
+        target_dirs=(".")
+    else
+        target_dirs=("$@")
+    fi
+
+    # Verify all directories exist
+    for dir in "${target_dirs[@]}"; do
+        if [ ! -d "$dir" ]; then
+            log_error "Directory '$dir' does not exist"
+            exit 1
+        fi
+    done
+fi
+
+# Track success/failure
+total_count=${#target_dirs[@]}
+success_count=0
+failed_count=0
+skipped_count=0
+
+# Run codegen for each directory
+for target_dir in "${target_dirs[@]}"; do
+    if run_codegen_for_directory "$target_dir" "$original_pwd"; then
+        ((success_count++))
+    else
+        # Check if it was skipped (no pubspec) or failed
+        pubspec_path=$(find_pubspec "$target_dir")
+        if [ -z "$pubspec_path" ] || ! has_build_runner "$pubspec_path"; then
+            ((skipped_count++))
+        else
+            ((failed_count++))
+        fi
+    fi
+done
+
+# Print summary if multiple directories
+if [ $total_count -gt 1 ]; then
+    echo ""
+    echo -e "${BOLD}Summary:${NC}"
+    [ $success_count -gt 0 ] && log_success "$success_count succeeded"
+    [ $failed_count -gt 0 ] && log_error "$failed_count failed"
+    [ $skipped_count -gt 0 ] && log_warning "$skipped_count skipped (no build_runner)"
+    echo ""
+fi
+
+# Exit with appropriate code
+if [ $failed_count -gt 0 ]; then
+    exit 1
+elif [ $success_count -gt 0 ]; then
+    exit 0
+else
+    # All were skipped
+    exit 0
+fi
