@@ -178,26 +178,84 @@ relativePath() {
 # EXCLUSION LOGIC
 # ==============================================================================
 
+# Read exclusion patterns from a script-specific exclude file
+# Usage: load_exclude_patterns "script-name"
+# Returns: Patterns in the EXCLUDE_PATTERNS global array
+load_exclude_patterns() {
+    local script_name="$1"
+    local exclude_file="$SCRIPTS_DIR/.${script_name}-exclude"
+    local folder
+
+    EXCLUDE_PATTERNS=()
+
+    [ -f "$exclude_file" ] || return 0
+
+    # The `|| [ -n "$folder" ]` guard picks up a final line that has no
+    # trailing newline, which `read` alone would silently drop.
+    while IFS= read -r folder || [ -n "$folder" ]; do
+        # Trim carriage returns and surrounding whitespace
+        folder="${folder%$'\r'}"
+        folder="${folder#"${folder%%[![:space:]]*}"}"
+        folder="${folder%"${folder##*[![:space:]]}"}"
+
+        # Skip empty lines and comments
+        [[ -z "$folder" || "$folder" == \#* ]] && continue
+
+        EXCLUDE_PATTERNS+=("$folder")
+    done < "$exclude_file"
+}
+
+# Build a find expression that prunes excluded directories
+# Usage: build_prune_expr "script-name" "/path/to/search"
+# Returns: Prune expression ending in -o, or empty string if nothing is excluded
+#
+# Pruning matters more than filtering here: `-not -path` still walks every file
+# under an excluded directory and only hides it from the output, so a single
+# Pods or node_modules tree can dominate the runtime of a scan.
+build_prune_expr() {
+    local script_name="$1"
+    local dir="$2"
+    local prune_expr=""
+    local pattern
+    local match
+
+    load_exclude_patterns "$script_name"
+
+    for pattern in "${EXCLUDE_PATTERNS[@]}"; do
+        # Patterns with a slash are matched against the path, bare names
+        # against the directory name itself.
+        if [[ "$pattern" == */* ]]; then
+            match="-path \"*/$pattern\""
+        else
+            match="-name \"$pattern\""
+        fi
+
+        if [ -z "$prune_expr" ]; then
+            prune_expr="$match"
+        else
+            prune_expr="$prune_expr -o $match"
+        fi
+    done
+
+    [ -z "$prune_expr" ] && return 0
+
+    # `! -path "$dir"` keeps the search root itself from being pruned when its
+    # own name matches an exclusion, e.g. running the script from inside a
+    # directory that happens to be called "web". find reports the root under
+    # exactly the path it was given, so this only ever spares the root.
+    echo "\\( -type d ! -path \"$dir\" \\( $prune_expr \\) -prune \\) -o"
+}
+
 # Build find command with exclusions from script-specific exclude file
 # Usage: build_find_command "/path/to/search" "script-name"
 # Returns: Find command string (stdout)
 build_find_command() {
     local dir="$1"
     local script_name="$2"
-    local exclude_file="$SCRIPTS_DIR/.${script_name}-exclude"
-    local find_cmd="find \"$dir\""
+    local prune_expr
+    prune_expr=$(build_prune_expr "$script_name" "$dir")
 
-    # Add exclusions from config file if it exists
-    if [ -f "$exclude_file" ]; then
-        while IFS= read -r folder; do
-            # Skip empty lines and comments
-            [[ -z "$folder" || "$folder" =~ ^[[:space:]]*# ]] && continue
-            find_cmd="$find_cmd -not -path \"*/$folder\" -not -path \"*/$folder/*\""
-        done < "$exclude_file"
-    fi
-
-    find_cmd="$find_cmd -type f \( -name \"pubspec.yaml\" -o -name \"pubspec.yml\" \) -print0"
-    echo "$find_cmd"
+    echo "find \"$dir\" $prune_expr \\( -type f \\( -name \"pubspec.yaml\" -o -name \"pubspec.yml\" \\) -print0 \\)"
 }
 
 # ==============================================================================

@@ -83,9 +83,16 @@ clean_project() {
     fi
 
     # Delete any nested "build" directories in subdirectories that are Flutter/Dart projects
+    local nested_find_cmd
+    nested_find_cmd=$(build_find_command "." "flutterclean")
+
     while IFS= read -r -d '' nested_pubspec; do
         local nested_dir
         nested_dir=$(dirname "$nested_pubspec")
+
+        # Skip this project's own pubspec, only nested ones are of interest
+        [ "$nested_dir" = "." ] && continue
+
         if [ -d "$nested_dir/build" ]; then
             size=$(calculate_size "$nested_dir/build")
             total_size=$((total_size + size))
@@ -95,7 +102,7 @@ clean_project() {
                 success=$result
             fi
         fi
-    done < <(find . -mindepth 2 \( -name "pubspec.yaml" -o -name "pubspec.yml" \) -print0 2>/dev/null)
+    done < <(eval "$nested_find_cmd" 2>/dev/null)
 
     # Output the size to stdout (will be captured separately)
     echo "$total_size"
