@@ -1,0 +1,35 @@
+# Global flutterclean rules.
+#
+# A flutterclean.yaml in the directory being cleaned takes the place of this
+# file, so a repo can carry its own rules. Glob patterns are matched against
+# paths relative to the directory being cleaned:
+#
+#   **      crosses directory boundaries
+#   *       matches within a single path segment
+#   **/foo  matches foo at any depth, including the top level
+#   foo/**  matches foo and everything inside it
+#
+# These rules sit on top of the built-in ones (build, .dart_tool and an
+# untracked pubspec.lock are always deleted, and .flutterclean-exclude is
+# always skipped). Where the two disagree, this file wins.
+
+clean:
+  # Deleted in addition to the built-in targets.
+  include:
+    - "**/node_modules/**"
+
+  # Never deleted, not even when a rule above or a built-in target matches.
+  # Excluding a directory protects everything inside it.
+  # exclude:
+  #   - "**/hyper_zones"
+
+traverse:
+  # Never searched. Cheaper than clean.exclude, but nothing inside can be
+  # found or cleaned either.
+  # exclude:
+  #   - "**/third_party/**"
+
+  # Searched even when .flutterclean-exclude or the list above skips it.
+  # Name the excluded directory itself, not something below it.
+  # include:
+  #   - "**/apps/web"

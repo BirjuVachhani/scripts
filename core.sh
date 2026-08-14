@@ -196,6 +196,232 @@ relativePath() {
 }
 
 # ==============================================================================
+# YAML CONFIG
+# ==============================================================================
+
+# Locate a script's config file
+# Usage: find_config_file "flutterclean" "/path/to/target/dir"
+# Returns: Path to the config file (stdout), empty if none exists
+#
+# A config next to the code being cleaned wins over the global one in the
+# scripts directory, so a repo can carry its own rules.
+find_config_file() {
+    local script_name="$1"
+    local dir="$2"
+    local candidate
+
+    for candidate in "$dir/$script_name.yaml" "$dir/$script_name.yml" \
+                     "$SCRIPTS_DIR/$script_name.yaml" "$SCRIPTS_DIR/$script_name.yml"; do
+        if [ -f "$candidate" ]; then
+            echo "$candidate"
+            return 0
+        fi
+    done
+
+    return 1
+}
+
+# Read a list of scalars out of a two-level YAML block
+# Usage: read_yaml_list "/path/to/file.yaml" "clean" "include"
+# Returns: One entry per line (stdout)
+#
+# This understands the small subset the config files use: top-level sections,
+# one level of nested keys, and block sequences of plain or quoted scalars.
+# Flow sequences ("key: [a, b]") are not supported.
+read_yaml_list() {
+    local file="$1"
+    local section="$2"
+    local key="$3"
+
+    [ -f "$file" ] || return 0
+
+    awk -v want_section="$section" -v want_key="$key" '
+        function trim(v) {
+            sub(/^[[:space:]]+/, "", v)
+            sub(/[[:space:]]+$/, "", v)
+            return v
+        }
+        function unquote(v,   quote, rest, end) {
+            v = trim(v)
+            quote = substr(v, 1, 1)
+            if (quote == "\"" || quote == "\047") {
+                rest = substr(v, 2)
+                end = index(rest, quote)
+                if (end > 0) return substr(rest, 1, end - 1)
+            }
+            # Only strip a comment that is set off by whitespace, so that a
+            # pattern may still contain a "#" character.
+            sub(/[[:space:]]+#.*$/, "", v)
+            return trim(v)
+        }
+
+        { line = $0; sub(/\r$/, "", line) }
+
+        line ~ /^[[:space:]]*$/ { next }
+        line ~ /^[[:space:]]*#/ { next }
+
+        # List item. Checked before keys so that a value may contain a colon.
+        line ~ /^[[:space:]]+-[[:space:]]*/ {
+            if (in_section && in_key) {
+                value = line
+                sub(/^[[:space:]]*-[[:space:]]*/, "", value)
+                value = unquote(value)
+                if (value != "") print value
+            }
+            next
+        }
+
+        # Top-level section, written flush against the left margin.
+        line ~ /^[^[:space:]#-][^:]*:/ {
+            name = line
+            sub(/:.*$/, "", name)
+            in_section = (trim(name) == want_section)
+            in_key = 0
+            next
+        }
+
+        # Nested key.
+        line ~ /^[[:space:]]+[^[:space:]#-][^:]*:/ {
+            name = line
+            sub(/:.*$/, "", name)
+            in_key = (in_section && trim(name) == want_key)
+            next
+        }
+    ' "$file"
+}
+
+# ==============================================================================
+# GLOB MATCHING
+# ==============================================================================
+
+# Convert a glob pattern to an anchored regular expression
+# Usage: glob_to_regex "**/node_modules/**"
+# Returns: Regular expression (stdout)
+#
+# "**" crosses directory boundaries, "*" and "?" do not. A leading "**/" also
+# matches at the top level, and a trailing "/**" also matches the directory
+# itself, so "**/node_modules/**" covers node_modules wherever it appears
+# along with everything inside it.
+glob_to_regex() {
+    local glob="$1"
+    local regex=""
+    local suffix=""
+    local len
+    local i=0
+    local char
+
+    if [ "${glob%/\*\*}" != "$glob" ]; then
+        glob="${glob%/\*\*}"
+        suffix="(/.*)?"
+    fi
+
+    len=${#glob}
+
+    while [ $i -lt $len ]; do
+        char="${glob:$i:1}"
+
+        case "$char" in
+            '*')
+                if [ "${glob:$((i + 1)):1}" = "*" ]; then
+                    if [ "${glob:$((i + 2)):1}" = "/" ]; then
+                        # "**/" may stand for no directory at all
+                        regex="$regex(.*/)?"
+                        i=$((i + 3))
+                        continue
+                    fi
+                    regex="$regex.*"
+                    i=$((i + 2))
+                    continue
+                fi
+                regex="$regex[^/]*"
+                ;;
+            '?')
+                regex="$regex[^/]"
+                ;;
+            '.' | '+' | '(' | ')' | '[' | ']' | '^' | '$' | '{' | '}' | '|' | '\')
+                regex="$regex\\$char"
+                ;;
+            *)
+                regex="$regex$char"
+                ;;
+        esac
+
+        i=$((i + 1))
+    done
+
+    echo "^$regex$suffix\$"
+}
+
+# Convert globs into find -path predicates rooted at a directory
+# Usage: globs_to_find_paths "/search/root" "**/build/**" "packages/*/build"
+# Returns: Predicates joined with -o (stdout), empty if no globs are given
+#
+# A trailing "/**" is dropped because pruning a directory already covers its
+# contents. A leading "**/" expands to two predicates, one anchored at the root
+# and one for every level below it, since find's "*" does not match an empty
+# path segment.
+globs_to_find_paths() {
+    local root="$1"
+    shift
+
+    local expr=""
+    local glob
+    local pattern
+
+    for glob in "$@"; do
+        [ -z "$glob" ] && continue
+
+        # Pruning the directory covers everything under it
+        glob="${glob%/\*\*}"
+        glob="${glob%/\*}"
+
+        local -a forms=()
+        if [ "${glob#\*\*/}" != "$glob" ]; then
+            forms=("${glob#\*\*/}" "*/${glob#\*\*/}")
+        else
+            forms=("$glob")
+        fi
+
+        for pattern in "${forms[@]}"; do
+            # find's "*" already crosses directory boundaries
+            while [ "${pattern//\*\*/\*}" != "$pattern" ]; do
+                pattern="${pattern//\*\*/\*}"
+            done
+
+            [ -z "$pattern" ] && continue
+
+            if [ -n "$expr" ]; then
+                expr="$expr -o "
+            fi
+            expr="$expr-path \"$root/$pattern\""
+        done
+    done
+
+    echo "$expr"
+}
+
+# Check whether a path matches any of the given globs
+# Usage: path_matches_glob "app/node_modules" "**/node_modules/**" ...
+# Returns: 0 on a match, 1 otherwise
+path_matches_glob() {
+    local path="$1"
+    shift
+
+    local glob
+    local regex
+
+    for glob in "$@"; do
+        [ -z "$glob" ] && continue
+        regex=$(glob_to_regex "$glob")
+        if [[ "$path" =~ $regex ]]; then
+            return 0
+        fi
+    done
+
+    return 1
+}
+
+# ==============================================================================
 # EXCLUSION LOGIC
 # ==============================================================================
 
@@ -233,10 +459,14 @@ load_exclude_patterns() {
 # Pruning matters more than filtering here: `-not -path` still walks every file
 # under an excluded directory and only hides it from the output, so a single
 # Pods or node_modules tree can dominate the runtime of a scan.
+#
+# The TRAVERSE_EXCLUDE_GLOBS and TRAVERSE_INCLUDE_GLOBS arrays, when a caller
+# has filled them from a config file, extend and override the exclude file.
 build_prune_expr() {
     local script_name="$1"
     local dir="$2"
     local prune_expr=""
+    local keep_expr=""
     local pattern
     local match
 
@@ -258,13 +488,29 @@ build_prune_expr() {
         fi
     done
 
+    match=$(globs_to_find_paths "$dir" "${TRAVERSE_EXCLUDE_GLOBS[@]}")
+    if [ -n "$match" ]; then
+        if [ -z "$prune_expr" ]; then
+            prune_expr="$match"
+        else
+            prune_expr="$prune_expr -o $match"
+        fi
+    fi
+
     [ -z "$prune_expr" ] && return 0
+
+    # Configured includes win over every exclusion, so a directory that would
+    # otherwise be skipped can be walked again.
+    keep_expr=$(globs_to_find_paths "$dir" "${TRAVERSE_INCLUDE_GLOBS[@]}")
+    if [ -n "$keep_expr" ]; then
+        keep_expr=" ! \\( $keep_expr \\)"
+    fi
 
     # `! -path "$dir"` keeps the search root itself from being pruned when its
     # own name matches an exclusion, e.g. running the script from inside a
     # directory that happens to be called "web". find reports the root under
     # exactly the path it was given, so this only ever spares the root.
-    echo "\\( -type d ! -path \"$dir\" \\( $prune_expr \\) -prune \\) -o"
+    echo "\\( -type d ! -path \"$dir\"$keep_expr \\( $prune_expr \\) -prune \\) -o"
 }
 
 # Build find command with exclusions from script-specific exclude file

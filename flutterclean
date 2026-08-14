@@ -29,80 +29,174 @@ print_usage() {
     echo "  - Deleting 'build' directories"
     echo "  - Deleting '.dart_tool' directories"
     echo "  - Deleting 'pubspec.lock' files (only if not tracked in git)"
-    echo "  - Cleaning nested project directories"
+    echo "  - Deleting anything listed under 'clean.include' in flutterclean.yaml"
     echo ""
     echo "Configuration:"
     echo "  - Exclude patterns: Edit .flutterclean-exclude in the scripts directory"
+    echo "  - Extra rules: flutterclean.yaml in the directory being cleaned, or in"
+    echo "    the scripts directory as a global default. Its glob patterns are"
+    echo "    relative to the directory being cleaned and win over the rules above."
+    echo ""
+    echo "    clean:"
+    echo "      include:      # deleted in addition to the built-in targets"
+    echo "        - \"**/node_modules/**\""
+    echo "      exclude:      # never deleted, not even the built-in targets"
+    echo "        - \"**/hyper_zones\""
+    echo ""
+    echo "    traverse:"
+    echo "      exclude:      # never searched"
+    echo "        - \"**/build/**\""
+    echo "      include:      # searched even when excluded above"
+    echo "        - \"**/apps/web\""
+}
+
+# Load the rules from flutterclean.yaml, if there is one
+# Usage: load_config "/path/to/directory"
+# Returns: Patterns in the CLEAN_* and TRAVERSE_* arrays, path in CONFIG_FILE
+load_config() {
+    local dir="$1"
+    local pattern
+
+    CLEAN_INCLUDE_GLOBS=()
+    CLEAN_EXCLUDE_GLOBS=()
+    TRAVERSE_INCLUDE_GLOBS=()
+    TRAVERSE_EXCLUDE_GLOBS=()
+
+    CONFIG_FILE=$(find_config_file "flutterclean" "$dir") || return 0
+
+    while IFS= read -r pattern; do
+        [ -n "$pattern" ] && CLEAN_INCLUDE_GLOBS+=("$pattern")
+    done < <(read_yaml_list "$CONFIG_FILE" "clean" "include")
+
+    while IFS= read -r pattern; do
+        [ -n "$pattern" ] && CLEAN_EXCLUDE_GLOBS+=("$pattern")
+    done < <(read_yaml_list "$CONFIG_FILE" "clean" "exclude")
+
+    while IFS= read -r pattern; do
+        [ -n "$pattern" ] && TRAVERSE_INCLUDE_GLOBS+=("$pattern")
+    done < <(read_yaml_list "$CONFIG_FILE" "traverse" "include")
+
+    while IFS= read -r pattern; do
+        [ -n "$pattern" ] && TRAVERSE_EXCLUDE_GLOBS+=("$pattern")
+    done < <(read_yaml_list "$CONFIG_FILE" "traverse" "exclude")
+}
+
+# Check whether a path is shielded from deletion by clean.exclude
+# Usage: is_protected "app/example/build"
+# Returns: 0 if protected, 1 otherwise
+#
+# A match on any ancestor protects everything beneath it, so excluding a
+# directory keeps its whole subtree intact.
+is_protected() {
+    local candidate="$1"
+
+    [ ${#CLEAN_EXCLUDE_GLOBS[@]} -eq 0 ] && return 1
+
+    while :; do
+        if path_matches_glob "$candidate" "${CLEAN_EXCLUDE_GLOBS[@]}"; then
+            return 0
+        fi
+
+        case "$candidate" in
+            */*) candidate="${candidate%/*}" ;;
+            *) break ;;
+        esac
+    done
+
+    return 1
+}
+
+# Delete one target unless it is protected, adding its size to total_size
+# Usage: remove_target "build" "app/example/build"
+# Returns: Exit code of the removal
+#
+# Reads and updates total_size from the calling function.
+remove_target() {
+    local target="$1"
+    local rel="$2"
+    local size
+
+    [ -e "$target" ] || return 0
+    is_protected "$rel" && return 0
+
+    size=$(calculate_size "$target")
+    total_size=$((total_size + size))
+
+    rm -rf "$target" 2>/dev/null
 }
 
 # Clean a single project directory and return size cleaned in bytes
+# Usage: clean_project "/abs/path/to/project" "relative/path/to/project"
 clean_project() {
     local project_dir="$1"
+    local project_rel="$2"
     local success=0
     local result
     local total_size=0
-    local size
+    local rel_prefix=""
+
+    # Prefix that turns a name inside the project into a path relative to the
+    # directory being cleaned, which is what the config globs match against.
+    if [ -n "$project_rel" ] && [ "$project_rel" != "." ]; then
+        rel_prefix="$project_rel/"
+    fi
 
     # Change to project directory
     cd "$project_dir" || return 1
 
     # Delete "build" directory
-    if [ -d "build" ]; then
-        size=$(calculate_size "build")
-        total_size=$((total_size + size))
-        rm -rf "build" 2>/dev/null
-        result=$?
-        if [ $result -ne 0 ]; then
-            success=$result
-        fi
+    remove_target "build" "${rel_prefix}build"
+    result=$?
+    if [ $result -ne 0 ]; then
+        success=$result
     fi
 
     # Delete ".dart_tool" directory
-    if [ -d ".dart_tool" ]; then
-        size=$(calculate_size ".dart_tool")
-        total_size=$((total_size + size))
-        rm -rf ".dart_tool" 2>/dev/null
+    remove_target ".dart_tool" "${rel_prefix}.dart_tool"
+    result=$?
+    if [ $result -ne 0 ]; then
+        success=$result
+    fi
+
+    # Delete "pubspec.lock" only if not tracked in git
+    if [ -f "pubspec.lock" ] && ! is_git_tracked "pubspec.lock" "$project_dir"; then
+        remove_target "pubspec.lock" "${rel_prefix}pubspec.lock"
         result=$?
         if [ $result -ne 0 ]; then
             success=$result
         fi
     fi
 
-    # Delete "pubspec.lock" only if not tracked in git
-    if [ -f "pubspec.lock" ]; then
-        local pubspec_lock_path="pubspec.lock"
-        if ! is_git_tracked "$pubspec_lock_path" "$project_dir"; then
-            size=$(calculate_size "pubspec.lock")
-            total_size=$((total_size + size))
-            rm -f "pubspec.lock" 2>/dev/null
-            result=$?
-            if [ $result -ne 0 ]; then
-                success=$result
-            fi
+    # Delete everything matched by clean.include
+    if [ ${#CLEAN_INCLUDE_GLOBS[@]} -gt 0 ]; then
+        local include_paths
+        include_paths=$(globs_to_find_paths "$SCAN_ROOT" "${CLEAN_INCLUDE_GLOBS[@]}")
+
+        if [ -n "$include_paths" ]; then
+            # Matched directories are pruned as well as printed, so the walk
+            # never descends into a tree that is about to be removed. The
+            # exclusions are rooted at SCAN_ROOT because that is what the
+            # config globs are written against.
+            local prune_expr
+            prune_expr=$(build_prune_expr "flutterclean" "$SCAN_ROOT")
+
+            local find_cmd
+            find_cmd="find \"$project_dir\""
+            find_cmd="$find_cmd \\( -path \"$project_dir\" \\) -o"
+            find_cmd="$find_cmd \\( -type d \\( $include_paths \\) -prune -print0 \\) -o"
+            find_cmd="$find_cmd $prune_expr"
+            find_cmd="$find_cmd \\( -type f \\( $include_paths \\) -print0 \\)"
+
+            local match_path
+            while IFS= read -r -d '' match_path; do
+                remove_target "$match_path" "${match_path#$SCAN_ROOT/}"
+                result=$?
+                if [ $result -ne 0 ]; then
+                    success=$result
+                fi
+            done < <(eval "$find_cmd" 2>/dev/null)
         fi
     fi
-
-    # Delete any nested "build" directories in subdirectories that are Flutter/Dart projects
-    local nested_find_cmd
-    nested_find_cmd=$(build_find_command "." "flutterclean")
-
-    while IFS= read -r -d '' nested_pubspec; do
-        local nested_dir
-        nested_dir=$(dirname "$nested_pubspec")
-
-        # Skip this project's own pubspec, only nested ones are of interest
-        [ "$nested_dir" = "." ] && continue
-
-        if [ -d "$nested_dir/build" ]; then
-            size=$(calculate_size "$nested_dir/build")
-            total_size=$((total_size + size))
-            rm -rf "$nested_dir/build" 2>/dev/null
-            result=$?
-            if [ $result -ne 0 ]; then
-                success=$result
-            fi
-        fi
-    done < <(eval "$nested_find_cmd" 2>/dev/null)
 
     # Output the size to stdout (will be captured separately)
     echo "$total_size"
@@ -166,7 +260,7 @@ process_directory() {
         size_file=$(mktemp /tmp/flutterclean_size.XXXXXX 2>/dev/null || echo "/tmp/flutterclean_size_$$_$count")
 
         # Run clean command in background, capturing size output
-        (clean_project "$project_dir" 2>/dev/null > "$size_file"; echo $? > "${size_file}.exit") &
+        (clean_project "$project_dir" "$rel_path" 2>/dev/null > "$size_file"; echo $? > "${size_file}.exit") &
         local pid=$!
 
         # Show spinner while process runs
@@ -237,8 +331,19 @@ fi
 # Convert to absolute path
 target_dir=$(cd "$target_dir" && pwd)
 
+# The root that every config glob is resolved against
+SCAN_ROOT="$target_dir"
+
+# Load flutterclean.yaml, which extends and overrides the built-in rules
+load_config "$target_dir"
+
 echo "----------------------------------------"
 echo "Starting Flutter clean in: $target_dir"
+if [ -n "$CONFIG_FILE" ]; then
+    # Show a repo-local config relative to the scan, a global one as a path
+    config_display="${CONFIG_FILE#$target_dir/}"
+    echo "Using config: ${config_display/#$HOME/~}"
+fi
 echo "----------------------------------------"
 
 # Process the directory
