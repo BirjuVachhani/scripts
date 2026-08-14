@@ -123,6 +123,27 @@ has_flutter_dependency() {
     return 1
 }
 
+# Check if a package is a member of a pub workspace
+# Usage: is_workspace_member "/path/to/pubspec.yaml"
+# Returns: 0 if the package resolves through a workspace, 1 otherwise
+#
+# Members carry a top-level "resolution: workspace" key. Their dependencies are
+# resolved by a single pub get at the workspace root, into one shared lockfile.
+is_workspace_member() {
+    local pubspec_path="$1"
+
+    grep -qE "^resolution:[[:space:]]*[\"']?workspace[\"']?" "$pubspec_path"
+}
+
+# Check if a package is the root of a pub workspace
+# Usage: is_workspace_root "/path/to/pubspec.yaml"
+# Returns: 0 if the pubspec declares a workspace, 1 otherwise
+is_workspace_root() {
+    local pubspec_path="$1"
+
+    grep -qE "^workspace:" "$pubspec_path"
+}
+
 # Check if project has build_runner as dev dependency
 # Usage: has_build_runner "/path/to/pubspec.yaml"
 # Returns: 0 if build_runner found, 1 otherwise

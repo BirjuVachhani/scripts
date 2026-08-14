@@ -46,6 +46,38 @@ print_usage() {
     echo "  - Exclude patterns: Edit .pubget-exclude in the scripts directory"
     echo "  - Environment: Edit .env for PUB_GET_NO_EXAMPLE setting"
     echo ""
+    echo -e "${BOLD}Notes:${NC}"
+    echo "  Packages with 'resolution: workspace' are skipped. A single pub get"
+    echo "  at their workspace root resolves the whole workspace at once."
+    echo ""
+}
+
+# Check if any workspace member under this root needs the Flutter SDK
+# Usage: workspace_needs_flutter "/path/to/pubspec.yaml"
+# Returns: 0 if a member depends on Flutter, 1 otherwise
+#
+# A workspace root often declares no dependencies of its own, so the choice
+# between flutter and dart has to come from the members it resolves for.
+workspace_needs_flutter() {
+    local pubspec_path="$1"
+    local root_dir
+    local member
+
+    is_workspace_root "$pubspec_path" || return 1
+
+    root_dir=$(dirname "$pubspec_path")
+
+    for member in "${workspace_members[@]}"; do
+        case "$member" in
+            "$root_dir"/*)
+                if has_flutter_dependency "$member"; then
+                    return 0
+                fi
+                ;;
+        esac
+    done
+
+    return 1
 }
 
 # ==============================================================================
@@ -82,6 +114,7 @@ done
 
 # Collect all projects from all directories
 all_projects=()
+workspace_members=()
 max_name_length=0
 
 for target_dir in "${target_dirs[@]}"; do
@@ -92,6 +125,13 @@ for target_dir in "${target_dirs[@]}"; do
     find_cmd=$(build_find_command "$target_dir" "pubget")
 
     while IFS= read -r -d '' pubspec_path; do
+        # A workspace member shares one resolution with the rest of its
+        # workspace, so the pub get at its root already covers it.
+        if is_workspace_member "$pubspec_path"; then
+            workspace_members+=("$pubspec_path")
+            continue
+        fi
+
         project_name=$(get_project_name "$pubspec_path")
 
         # Store project info: pubspec_path
@@ -106,7 +146,12 @@ done
 
 # Return if no projects found
 if [ ${#all_projects[@]} -eq 0 ]; then
-    log_warning "No Flutter/Dart projects found"
+    if [ ${#workspace_members[@]} -gt 0 ]; then
+        log_warning "Only workspace members found, nothing to resolve here"
+        log_info "Run pubget from the workspace root that owns them"
+    else
+        log_warning "No Flutter/Dart projects found"
+    fi
     exit 0
 fi
 
@@ -142,7 +187,7 @@ for pubspec_path in "${all_projects[@]}"; do
     project_name=$(get_project_name "$pubspec_path")
 
     # Determine command based on Flutter dependency
-    if has_flutter_dependency "$pubspec_path"; then
+    if has_flutter_dependency "$pubspec_path" || workspace_needs_flutter "$pubspec_path"; then
         command="flutter pub get"
     else
         command="dart pub get"
@@ -197,6 +242,9 @@ total_time_human=$(seconds_to_human "$total_time")
 echo ""
 echo "Summary:"
 echo "Total projects found: $count"
+if [ ${#workspace_members[@]} -gt 0 ]; then
+    echo "Workspace members skipped: ${#workspace_members[@]} (resolved by their workspace root)"
+fi
 if [ $errors -eq 0 ]; then
     echo "All projects updated successfully!"
 else
