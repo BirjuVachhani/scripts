@@ -110,7 +110,7 @@ run_codegen_for_directory() {
     # Determine project type and command
     local command
     if has_flutter_dependency "$pubspec_path"; then
-        command="flutter pub run build_runner build --delete-conflicting-outputs"
+        command="flutter pub run build_runner build"
 
         # Check if flutter is installed
         if ! command -v flutter &> /dev/null; then
@@ -118,7 +118,7 @@ run_codegen_for_directory() {
             return 1
         fi
     else
-        command="dart run build_runner build --delete-conflicting-outputs"
+        command="dart run build_runner build"
 
         # Check if dart is installed
         if ! command -v dart &> /dev/null; then
