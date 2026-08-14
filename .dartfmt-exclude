@@ -1,0 +1,16 @@
+# Folders to exclude from dartfmt scanning
+# Add one folder per line (bare name, or a pattern containing / to match a path)
+# These are pruned, so they are neither searched for projects nor formatted.
+.git
+build
+.dart_tool
+Pods
+.symlinks
+ephemeral
+node_modules
+ios
+android
+macos
+windows
+linux
+web

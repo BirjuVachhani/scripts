@@ -1,0 +1,283 @@
+#!/bin/bash
+
+# USAGE: Recursively searches for pubspec.yaml files under current directory and runs 'dart format' in each Flutter/Dart project.
+
+# ==============================================================================
+# LOAD CORE UTILITIES
+# ==============================================================================
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+CORE_LIB="$SCRIPT_DIR/core.sh"
+
+if [ ! -f "$CORE_LIB" ]; then
+    echo "Error: core.sh not found at $CORE_LIB"
+    echo "Please ensure core.sh is in the same directory as this script."
+    exit 1
+fi
+
+source "$CORE_LIB"
+
+# ==============================================================================
+# SCRIPT FUNCTIONS
+# ==============================================================================
+
+# Print script usage
+print_usage() {
+    echo ""
+    echo -e "${BOLD}${CYAN}dartfmt${NC} - Format Flutter/Dart projects"
+    echo ""
+    echo -e "${BOLD}Usage:${NC}"
+    echo "  dartfmt [directories...]"
+    echo ""
+    echo -e "${BOLD}Arguments:${NC}"
+    echo -e "  ${GREEN}directories${NC}  One or more directories (defaults to current directory)"
+    echo ""
+    echo -e "${BOLD}Description:${NC}"
+    echo "  Recursively searches for pubspec.yaml files and runs 'dart format' on"
+    echo "  the Dart files of every project it finds. Directories without a"
+    echo "  pubspec.yaml are skipped, so stray Dart files outside a project are"
+    echo "  left alone. Each file is formatted once, by the project that owns it."
+    echo ""
+    echo -e "${BOLD}Examples:${NC}"
+    echo "  dartfmt                    # Run in current directory"
+    echo "  dartfmt common             # Run in ./common"
+    echo "  dartfmt common server      # Run in ./common and ./server"
+    echo "  dartfmt . common server    # Run in ., ./common, and ./server"
+    echo ""
+    echo -e "${BOLD}Configuration:${NC}"
+    echo "  - Exclude patterns: Edit .dartfmt-exclude in the scripts directory."
+    echo "    Those directories are neither searched for projects nor formatted."
+    echo ""
+}
+
+# Build the find command that collects a project's own Dart files
+# Usage: build_format_find "/abs/project" "/abs/nested/project" ...
+# Returns: Find command string (stdout)
+#
+# Nested projects are pruned so every file is formatted exactly once, by the
+# project that owns it, rather than again by each of its ancestors.
+build_format_find() {
+    local project_dir="$1"
+    shift
+
+    local nested_expr=""
+    local nested
+
+    for nested in "$@"; do
+        if [ -n "$nested_expr" ]; then
+            nested_expr="$nested_expr -o "
+        fi
+        nested_expr="$nested_expr-path \"$nested\""
+    done
+
+    if [ -n "$nested_expr" ]; then
+        nested_expr="\\( -type d \\( $nested_expr \\) -prune \\) -o "
+    fi
+
+    local prune_expr
+    prune_expr=$(build_prune_expr "dartfmt" "$project_dir")
+
+    # "-exec ... +" batches the files and, unlike a pipe into xargs, does not
+    # run dart format at all when a project has no Dart files of its own.
+    echo "find \"$project_dir\" $nested_expr$prune_expr \\( -type f -name \"*.dart\" -exec dart format {} + \\)"
+}
+
+# Format a single project and report how many files changed
+# Usage: format_project "/abs/project" "/abs/nested/project" ...
+# Returns: Changed file count (stdout), exit code of the format run
+format_project() {
+    local find_cmd
+    find_cmd=$(build_format_find "$@")
+
+    local output
+    local result
+    output=$(eval "$find_cmd" 2>&1)
+    result=$?
+
+    # dart format ends with "Formatted 12 files (3 changed) in 0.21 seconds",
+    # once per batch when find splits a long file list, so the counts are
+    # summed rather than read from a single line.
+    local changed=0
+    local count
+    while IFS= read -r count; do
+        [ -n "$count" ] && changed=$((changed + count))
+    done < <(printf '%s\n' "$output" | sed -nE 's/.*\(([0-9]+) changed\).*/\1/p')
+
+    echo "$changed"
+
+    return $result
+}
+
+# Describe a changed file count for the table
+# Usage: changed_to_human 3
+# Returns: Human-readable count like "3 files" (stdout)
+changed_to_human() {
+    local changed="$1"
+
+    if [ "$changed" -eq 1 ]; then
+        echo "1 file"
+    else
+        echo "$changed files"
+    fi
+}
+
+# ==============================================================================
+# MAIN SCRIPT
+# ==============================================================================
+
+# Show help if requested
+if [ "$1" = "-h" ] || [ "$1" = "--help" ]; then
+    print_usage
+    exit 0
+fi
+
+# Check if Dart is installed
+require_command "dart" "Dart"
+
+# Store the original working directory for relative path display
+original_pwd="$PWD"
+
+# Get target directories from arguments (default to current directory)
+if [ $# -eq 0 ]; then
+    target_dirs=(".")
+else
+    target_dirs=("$@")
+fi
+
+# Verify all directories exist
+for dir in "${target_dirs[@]}"; do
+    if [ ! -d "$dir" ]; then
+        log_error "Directory '$dir' does not exist"
+        exit 1
+    fi
+done
+
+# Collect all projects from all directories
+all_projects=()
+project_dirs=()
+max_name_length=0
+
+for target_dir in "${target_dirs[@]}"; do
+    # Convert to absolute path
+    target_dir=$(cd "$target_dir" && pwd)
+
+    # Find all projects in this directory
+    find_cmd=$(build_find_command "$target_dir" "dartfmt")
+
+    while IFS= read -r -d '' pubspec_path; do
+        project_name=$(get_project_name "$pubspec_path")
+
+        # Store project info: pubspec_path
+        all_projects+=("$pubspec_path")
+        project_dirs+=("$(dirname "$pubspec_path")")
+
+        # Track max length
+        if (( ${#project_name} > max_name_length )); then
+            max_name_length=${#project_name}
+        fi
+    done < <(eval "$find_cmd")
+done
+
+# Return if no projects found
+if [ ${#all_projects[@]} -eq 0 ]; then
+    log_warning "No Flutter/Dart projects found"
+    exit 0
+fi
+
+# Add padding (10-15 spaces)
+max_name_length=$((max_name_length + 12))
+
+# Print header with directory info
+echo "----------------------------------------"
+if [ ${#target_dirs[@]} -eq 1 ]; then
+    target_dir_display=$(relativePath "$original_pwd" "$(cd "${target_dirs[0]}" && pwd)")
+    echo "Starting Dart format in: $target_dir_display"
+else
+    echo "Starting Dart format in: ${#target_dirs[@]} directories"
+fi
+echo "----------------------------------------"
+
+# Print table header
+printf "${GREY}%-7s${NC} ${GREY}%-${max_name_length}s${NC} ${GREY}%-12s${NC} ${GREY}:%s${NC}\n" "Status" "Project Name" "Changed" "Path"
+
+# Process all projects
+count=0
+errors=0
+total_changed=0
+
+for pubspec_path in "${all_projects[@]}"; do
+    count=$((count + 1))
+    project_dir=$(dirname "$pubspec_path")
+
+    # Get relative path from original working directory
+    rel_path=$(relativePath "$original_pwd" "$project_dir")
+
+    # Get project name from pubspec
+    project_name=$(get_project_name "$pubspec_path")
+
+    # Collect the projects nested inside this one, which format themselves
+    nested_dirs=()
+    for other_dir in "${project_dirs[@]}"; do
+        case "$other_dir" in
+            "$project_dir"/*) nested_dirs+=("$other_dir") ;;
+        esac
+    done
+
+    # Create padded project name
+    printf -v padded_name "%-${max_name_length}s" "$project_name"
+
+    # Create temp file to capture the changed count
+    changed_file=$(mktemp /tmp/dartfmt_changed.XXXXXX 2>/dev/null || echo "/tmp/dartfmt_changed_$$_$count")
+
+    # Run format command in background, capturing the changed count
+    (format_project "$project_dir" "${nested_dirs[@]}" 2>/dev/null > "$changed_file"; echo $? > "${changed_file}.exit") &
+    pid=$!
+
+    # Show spinner while process runs
+    show_spinner $pid "$padded_name" "$rel_path"
+
+    # Wait for process and capture result
+    wait $pid 2>/dev/null
+    exit_code=$(cat "${changed_file}.exit" 2>/dev/null || echo "1")
+    changed=$(cat "$changed_file" 2>/dev/null || echo "0")
+    rm -f "$changed_file" "${changed_file}.exit" 2>/dev/null
+
+    # Guard against a missing or malformed count
+    case "$changed" in
+        ''|*[!0-9]*) changed=0 ;;
+    esac
+
+    # Add to total
+    total_changed=$((total_changed + changed))
+
+    # Create padded count (12 chars) for alignment
+    printf -v padded_changed "%-12s" "$(changed_to_human "$changed")"
+
+    # Check result and replace spinner with status
+    if [ "$exit_code" -eq 0 ]; then
+        printf "\r${GREEN}%-7s${NC} ${GREEN}%s${NC} ${GREY}%s${NC} ${GREY}:%s${NC}\n" "[ok]" "$padded_name" "$padded_changed" "$rel_path"
+    else
+        printf "\r${RED}%-7s${NC} ${RED}%s${NC} ${GREY}%s${NC} ${GREY}:%s${NC}\n" "[error]" "$padded_name" "$padded_changed" "$rel_path"
+        errors=$((errors + 1))
+    fi
+done
+
+# Print summary
+echo ""
+echo "Summary:"
+echo "Total projects found: $count"
+if [ $errors -eq 0 ]; then
+    echo "All projects formatted successfully!"
+else
+    echo "Failed format operations: $errors"
+    echo "Successful format operations: $((count - errors))"
+fi
+echo "Total files changed: $total_changed"
+echo "----------------------------------------"
+
+# Exit with appropriate code
+if [ $errors -gt 0 ]; then
+    exit 1
+else
+    exit 0
+fi
