@@ -26,8 +26,10 @@ print_usage() {
     echo "Usage: $0 [directory]"
     echo "If directory is not specified, current directory will be used."
     echo "The script will recursively search for pubspec.yaml files and clean Flutter/Dart projects by:"
-    echo "  - Deleting 'build' directories"
-    echo "  - Deleting '.dart_tool' directories"
+    echo "  - Deleting 'build', 'dist', '.dart_tool', 'node_modules' and"
+    echo "    '.venv' directories"
+    echo "  - Deleting 'android/.gradle', 'ios/Pods', 'ios/build', 'macos/Pods'"
+    echo "    and 'macos/build' directories"
     echo "  - Deleting 'pubspec.lock' files (only if not tracked in git)"
     echo "  - Deleting anything listed under 'clean.include' in flutterclean.yaml"
     echo ""
@@ -144,19 +146,15 @@ clean_project() {
     # Change to project directory
     cd "$project_dir" || return 1
 
-    # Delete "build" directory
-    remove_target "build" "${rel_prefix}build"
-    result=$?
-    if [ $result -ne 0 ]; then
-        success=$result
-    fi
-
-    # Delete ".dart_tool" directory
-    remove_target ".dart_tool" "${rel_prefix}.dart_tool"
-    result=$?
-    if [ $result -ne 0 ]; then
-        success=$result
-    fi
+    # Delete the built-in target directories
+    local target
+    for target in build dist .dart_tool node_modules .venv android/.gradle ios/Pods ios/build macos/Pods macos/build; do
+        remove_target "$target" "${rel_prefix}${target}"
+        result=$?
+        if [ $result -ne 0 ]; then
+            success=$result
+        fi
+    done
 
     # Delete "pubspec.lock" only if not tracked in git
     if [ -f "pubspec.lock" ] && ! is_git_tracked "pubspec.lock" "$project_dir"; then

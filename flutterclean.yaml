@@ -9,9 +9,11 @@
 #   **/foo  matches foo at any depth, including the top level
 #   foo/**  matches foo and everything inside it
 #
-# These rules sit on top of the built-in ones (build, .dart_tool and an
-# untracked pubspec.lock are always deleted, and .flutterclean-exclude is
-# always skipped). Where the two disagree, this file wins.
+# These rules sit on top of the built-in ones (build, dist, .dart_tool,
+# node_modules, .venv, android/.gradle, ios/Pods, ios/build, macos/Pods,
+# macos/build and an untracked pubspec.lock are always deleted, and
+# .flutterclean-exclude is always skipped). Where the two disagree, this file
+# wins.
 
 clean:
   # Deleted in addition to the built-in targets.
